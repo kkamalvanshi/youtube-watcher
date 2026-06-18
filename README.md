@@ -1,7 +1,8 @@
 # YouTube Channel Watcher (Gmail-controlled)
 
 Watches YouTube channels and, on every new upload, uses Claude
-(`claude-sonnet-4-6`) to write a one-page summary, saves it as a `.md`, and emails
+(`claude-sonnet-4-6`) to write a detailed summary (a 20–40 word executive summary
+plus a full outline breakdown), saves it as a `.md`, and emails
 it to you with the `.md` **attached** — all in one threaded Gmail conversation.
 You add/list/delete channels by emailing the same Gmail address.
 

@@ -64,8 +64,12 @@ SUMMARY_SCHEMA = {
     "additionalProperties": False,
 }
 
-SYSTEM_PROMPT = """You summarize YouTube videos into a tight, skimmable one-page brief.
+SYSTEM_PROMPT = """You summarize YouTube videos into a detailed, skimmable brief.
 Return JSON with three fields: tldr, steps, markdown.
+
+Base everything STRICTLY on the transcript or description provided. Never invent
+details that aren't in the source. If the source is only a short description, produce a
+proportionally shorter breakdown — do NOT pad or fabricate to reach a word count.
 
 `markdown` must follow EXACTLY this structure (use the Source value provided to you):
 
@@ -73,32 +77,28 @@ Return JSON with three fields: tldr, steps, markdown.
 **Channel:** <name> · **Published:** <date> · **Watch:** <url>
 **Source:** <full transcript | description only>
 
-## TL;DR
-2-3 sentences: what it's about and its single main message.
+## Executive Summary
+A 20-40 word overview — the single big-picture point of the video.
 
-## What it covers
-- 5-8 ordered bullets through the main segments / arguments.
+## Detailed Breakdown
+A thorough OUTLINE of everything in the video, in order. Full sentences are NOT
+required — fragments and nested bullets are ideal. Cover every topic, argument,
+explanation, example, and number, and lay out the COMPLETE process / steps whenever the
+video has one (sets, reps, amounts, settings, sequence — leave nothing out). When the
+source is a full transcript, aim for ~1000-2000 words here; when it's only a
+description, be as detailed as the source genuinely supports.
 
-## Steps / Process   (INCLUDE THIS SECTION ONLY if the video gives a routine, recipe, workout, or how-to)
-- Every step / exercise / instruction in order, one line each — complete but terse
-  (e.g. "Incline DB press — 4x8-10, 90s rest", "Step 3: deglaze with 1/2 cup stock").
-  Do NOT drop any step.
-
-## Key takeaways
-- 3-5 concrete, actionable insights.
-
-## Worth noting
-- Up to 3 standout quotes / stats (omit this section entirely if none).
-
-## Verdict
-One sentence — who should watch the full video, or whether to skip.
+- <Topic / segment 1>
+  - key point
+  - supporting detail / number / example
+- <Topic / segment 2>
+  - ...
+  - (for any routine / recipe / how-to, list every step in order with specifics)
+(continue through the ENTIRE video — do not skip sections)
 
 Rules:
-- Keep the narrative sections within one page (~400-500 words total).
-- The Steps / Process section, WHEN PRESENT, must be COMPLETE (every step), even if it
-  pushes the doc past one page. Omit it entirely if the video is not instructional.
-- `tldr` = the 1-3 sentence hook as plain text (no markdown headers).
-- `steps` = the same list of steps as a plain array of short strings, in order;
+- `tldr` = the Executive Summary text (20-40 words, plain text, no markdown headers).
+- `steps` = the complete process / steps as a plain array of short strings, in order;
   use an empty array [] if the video has no routine / recipe / how-to.
 """
 
@@ -227,7 +227,7 @@ def summarize(title, channel, url, published, source, content):
     )
     resp = client.messages.create(
         model=MODEL,
-        max_tokens=8000,
+        max_tokens=16000,
         thinking={"type": "adaptive"},
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user}],
