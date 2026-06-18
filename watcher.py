@@ -276,6 +276,7 @@ def send_update_email(channel_name, title, url, published, tldr, steps, md_path,
     msg = EmailMessage()
     msg["From"] = addr
     msg["To"] = addr
+    msg["X-YT-Watcher"] = "bot"
     if last_id:
         msg["Subject"] = "Re: " + UPDATES_SUBJECT
         msg["In-Reply-To"] = last_id
@@ -324,6 +325,7 @@ def send_reply(to_addr, orig_subject, orig_msgid, body, dry=False):
     msg = EmailMessage()
     msg["From"] = addr
     msg["To"] = to_addr
+    msg["X-YT-Watcher"] = "bot"
     msg["Subject"] = subject
     msg["Message-ID"] = make_msgid()
     if orig_msgid:
@@ -593,12 +595,18 @@ def run_commands(dry=False):
     mailbox = imaplib.IMAP4_SSL("imap.gmail.com", 993)
     mailbox.login(addr, password)
     mailbox.select("INBOX")
-    _, data = mailbox.search(None, "UNSEEN")
+    # Search recent `yt`-subject mail (read OR unread) and dedupe via processed_emails.json.
+    # Not UNSEEN-only: the user opening the mail — or Gmail auto-reading self-sent mail —
+    # would otherwise hide a valid command.
+    since = (datetime.datetime.now(PACIFIC) - datetime.timedelta(days=3)).strftime("%d-%b-%Y")
+    _, data = mailbox.search(None, "SINCE", since, "SUBJECT", "yt")
     msg_nums = data[0].split()
 
     for num in msg_nums:
         _, fetched = mailbox.fetch(num, "(BODY.PEEK[])")
         message = email.message_from_bytes(fetched[0][1], policy=policy.default)
+        if message.get("X-YT-Watcher"):  # our own outgoing mail — never treat as a command
+            continue
         msgid = message.get("Message-ID", "")
         if msgid and msgid in processed:
             continue
