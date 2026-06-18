@@ -42,7 +42,7 @@ PROCESSED_FILE = STATE / "processed_emails.json"
 PENDING_FILE = STATE / "pending.json"
 LAST_CHECKED_FILE = STATE / "last_checked.txt"
 
-UPDATES_SUBJECT = "\U0001F4FA YouTube watcher — new video summaries"
+UPDATES_SUBJECT = "\U0001F4FA YouTube watcher"
 RSS_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={cid}"
 MODEL = "claude-sonnet-4-6"
 PACIFIC = ZoneInfo("America/Los_Angeles")
@@ -57,15 +57,14 @@ SUMMARY_SCHEMA = {
     "type": "object",
     "properties": {
         "tldr": {"type": "string"},
-        "steps": {"type": "array", "items": {"type": "string"}},
         "markdown": {"type": "string"},
     },
-    "required": ["tldr", "steps", "markdown"],
+    "required": ["tldr", "markdown"],
     "additionalProperties": False,
 }
 
 SYSTEM_PROMPT = """You summarize YouTube videos into a detailed, skimmable brief.
-Return JSON with three fields: tldr, steps, markdown.
+Return JSON with two fields: tldr, markdown.
 
 Base everything STRICTLY on the transcript or description provided. Never invent
 details that aren't in the source. If the source is only a short description, produce a
@@ -88,18 +87,21 @@ video has one (sets, reps, amounts, settings, sequence — leave nothing out). W
 source is a full transcript, aim for ~1000-2000 words here; when it's only a
 description, be as detailed as the source genuinely supports.
 
-- <Topic / segment 1>
-  - key point
-  - supporting detail / number / example
-- <Topic / segment 2>
-  - ...
+Use nested bullets UP TO FOUR LEVELS DEEP where the content has that structure.
+Indent each deeper level by exactly 2 spaces and start every bullet with "- ", e.g.:
+
+- <Topic / segment>
+  - <main point>
+    - <sub-point / supporting detail>
+      - <finer detail, number, example, or sub-step>
+- <next Topic / segment>
   - (for any routine / recipe / how-to, list every step in order with specifics)
-(continue through the ENTIRE video — do not skip sections)
+(continue through the ENTIRE video — do not skip sections; nest down to 4 levels when it adds clarity)
 
 Rules:
 - `tldr` = the Executive Summary text (20-40 words, plain text, no markdown headers).
-- `steps` = the complete process / steps as a plain array of short strings, in order;
-  use an empty array [] if the video has no routine / recipe / how-to.
+- Put ALL detail (including the full process/steps) in `markdown` — the email body only
+  shows the TL;DR, so nothing important should live outside the markdown.
 """
 
 
@@ -141,13 +143,12 @@ def slugify(text):
 
 
 def footer():
-    addr = env("GMAIL_ADDRESS")
     return (
         "\n\n───────────────\n"
-        f'Commands — email {addr}, subject starting "yt":\n'
-        "  • Add:    yt add <YouTube channel or video link>\n"
-        "  • List:   yt list\n"
-        "  • Delete: yt delete   (then reply with the number or name)\n"
+        "Reply in this thread to control me:\n"
+        "  • Add a channel:    add <YouTube channel or video link>\n"
+        "  • List channels:    list\n"
+        "  • Delete a channel: delete   (then reply with the number or name)\n"
     )
 
 
@@ -258,97 +259,100 @@ def summarize(title, channel, url, published, source, content):
 # --------------------------------------------------------------------------- #
 # Email out (SMTP)
 # --------------------------------------------------------------------------- #
-def smtp_send(msg):
-    addr = env("GMAIL_ADDRESS")
-    password = env("GMAIL_APP_PASSWORD")
-    with smtplib.SMTP("smtp.gmail.com", 587) as server:
-        server.starttls()
-        server.login(addr, password)
-        server.send_message(msg)
+def resend_send(subject, text_body, headers, reply_to, attachment=None):
+    """Send one email via the Resend HTTP API (https://resend.com)."""
+    import base64
+
+    api_key = env("RESEND_API_KEY")
+    from_addr = os.environ.get("RESEND_FROM") or "YouTube Watcher <onboarding@resend.dev>"
+    recipient = os.environ.get("RECIPIENT") or env("GMAIL_ADDRESS")
+    payload = {
+        "from": from_addr,
+        "to": [recipient],
+        "reply_to": reply_to,
+        "subject": subject,
+        "text": text_body,
+        "headers": headers,
+    }
+    if attachment is not None:
+        payload["attachments"] = [
+            {
+                "filename": attachment.name,
+                "content": base64.b64encode(attachment.read_bytes()).decode(),
+            }
+        ]
+    resp = requests.post(
+        "https://api.resend.com/emails",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
-def send_update_email(channel_name, title, url, published, tldr, steps, md_path, dry=False):
-    addr = env("GMAIL_ADDRESS")
+def send_threaded(body, attachment=None, dry=False):
+    """Send a message into the single canonical conversation thread, via Resend.
+
+    Sends from a distinct address (so it arrives as normal inbox mail, not 'from me'),
+    with Reply-To set to your address so your in-thread replies route back to the
+    Gmail inbox the command listener reads. Tagged X-YT-Watcher to avoid re-ingestion.
+    All bot mail uses one constant subject so Gmail keeps it in a single conversation.
+    """
+    recipient = os.environ.get("RECIPIENT") or env("GMAIL_ADDRESS")
     thread = load_json(THREAD_FILE, {})
+    base_subject = thread.get("base_subject", UPDATES_SUBJECT)
     last_id = thread.get("last_message_id")
     refs = thread.get("references", [])
-
-    msg = EmailMessage()
-    msg["From"] = addr
-    msg["To"] = addr
-    msg["X-YT-Watcher"] = "bot"
-    if last_id:
-        msg["Subject"] = "Re: " + UPDATES_SUBJECT
-        msg["In-Reply-To"] = last_id
-        msg["References"] = " ".join(refs)
-    else:
-        msg["Subject"] = UPDATES_SUBJECT
     new_id = make_msgid()
-    msg["Message-ID"] = new_id
 
-    body = (
-        f'\U0001F3AC {channel_name} — "{title}"\n\n'
-        f"▶  {url}\n"
-        f"\U0001F5D3  Published {published}\n\n"
-        f"TL;DR\n{tldr}\n"
-    )
-    if steps:
-        body += "\nSteps / process:\n"
-        body += "\n".join(f"{i}. {step}" for i, step in enumerate(steps, 1)) + "\n"
-    body += f"\nFull summary attached: {md_path.name}\n"
-    body += footer()
-    msg.set_content(body)
-    msg.add_attachment(
-        md_path.read_bytes(), maintype="text", subtype="markdown", filename=md_path.name
-    )
+    headers = {"X-YT-Watcher": "bot", "Message-ID": new_id}
+    if last_id:
+        headers["In-Reply-To"] = last_id
+        headers["References"] = " ".join(refs)
 
     if dry:
-        print("---- DRY-RUN UPDATE EMAIL ----")
-        print("Subject:", msg["Subject"])
+        print("---- DRY-RUN THREADED EMAIL (Resend) ----")
+        print("Subject:", base_subject)
         print(body)
         return
 
-    smtp_send(msg)
-    thread.setdefault("base_subject", UPDATES_SUBJECT)
+    resend_send(base_subject, body + footer(), headers, reply_to=recipient, attachment=attachment)
+    thread.setdefault("base_subject", base_subject)
     thread.setdefault("root_message_id", new_id)
     thread["last_message_id"] = new_id
     thread["references"] = refs + [new_id]
     save_json(THREAD_FILE, thread)
 
 
-def send_reply(to_addr, orig_subject, orig_msgid, body, dry=False):
-    addr = env("GMAIL_ADDRESS")
-    subject = orig_subject or "yt"
-    if not subject.lower().startswith("re:"):
-        subject = "Re: " + subject
-
-    msg = EmailMessage()
-    msg["From"] = addr
-    msg["To"] = to_addr
-    msg["X-YT-Watcher"] = "bot"
-    msg["Subject"] = subject
-    msg["Message-ID"] = make_msgid()
-    if orig_msgid:
-        msg["In-Reply-To"] = orig_msgid
-        msg["References"] = orig_msgid
-    msg.set_content(body + footer())
-
-    if dry:
-        print("---- DRY-RUN REPLY ----")
-        print("Subject:", subject)
-        print(body)
-        return
-    smtp_send(msg)
-
-
 # --------------------------------------------------------------------------- #
 # Summary file
 # --------------------------------------------------------------------------- #
-def write_summary_md(channel_name, video_id, title, markdown, published_date):
+def write_summary_pdf(channel_name, video_id, title, markdown_text, published_date):
+    """Render the markdown summary to a PDF and return its path."""
+    import markdown as md_lib
+    from xhtml2pdf import pisa
+
     directory = SUMMARIES / slugify(channel_name)
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{published_date}-{video_id}-{slugify(title)}.md"
-    path.write_text(markdown.rstrip() + "\n")
+    path = directory / f"{published_date}-{video_id}-{slugify(title)}.pdf"
+
+    html_body = md_lib.markdown(markdown_text, extensions=["extra", "sane_lists"])
+    html = (
+        "<html><head><meta charset='utf-8'><style>"
+        "body{font-family:Helvetica,Arial,sans-serif;font-size:10.5px;line-height:1.45;color:#222;}"
+        "h1{font-size:17px;margin:0 0 4px;}"
+        "h2{font-size:13px;margin:12px 0 4px;border-bottom:1px solid #cccccc;padding-bottom:2px;}"
+        "h3{font-size:11.5px;margin:9px 0 3px;}"
+        "ul{margin:2px 0;padding-left:16px;}"
+        "li{margin:1px 0;}"
+        "p{margin:3px 0;}"
+        "</style></head><body>" + html_body + "</body></html>"
+    )
+    with open(path, "wb") as fh:
+        status = pisa.CreatePDF(src=html, dest=fh, encoding="utf-8")
+    if status.err:
+        raise RuntimeError(f"PDF generation failed for {video_id}")
     return path
 
 
@@ -377,10 +381,17 @@ def process_new_video(channel_name, entry, dry=False):
 
     print(f"  summarizing '{title}' ({source})")
     result = summarize(title, channel_name, url, published_human, source, content)
-    path = write_summary_md(channel_name, video_id, title, result["markdown"], published_date)
-    send_update_email(
-        channel_name, title, url, published_human, result["tldr"], result.get("steps", []), path, dry=dry
+    path = write_summary_pdf(channel_name, video_id, title, result["markdown"], published_date)
+
+    body = (
+        f'\U0001F3AC {channel_name} — "{title}"\n\n'
+        f"▶  {url}\n"
+        f"\U0001F5D3  Published {published_human}\n\n"
+        f"TL;DR\n{result['tldr']}\n\n"
+        f"Full summary — executive summary + detailed breakdown — is in the attached PDF:\n{path.name}\n"
     )
+
+    send_threaded(body, attachment=path, dry=dry)
     print(f"  wrote {path} and emailed it")
 
 
@@ -453,6 +464,29 @@ def get_text_body(message):
                 return re.sub(r"<[^>]+>", " ", part.get_content())
         return ""
     return message.get_content()
+
+
+def header_refs(message):
+    """All Message-IDs this message references (In-Reply-To + References headers)."""
+    ids = set()
+    for header in ("In-Reply-To", "References"):
+        ids.update(re.findall(r"<[^>]+>", message.get(header, "")))
+    return ids
+
+
+def extract_reply_text(body):
+    """The top, un-quoted portion of a reply — strips Gmail quote, attribution, footer."""
+    lines = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(">"):
+            break
+        if re.match(r"On .+wrote:$", stripped):
+            break
+        if stripped.startswith("─") or stripped.startswith("___") or stripped.startswith("----"):
+            break
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def load_pending():
@@ -558,8 +592,8 @@ def do_delete(cid, channels):
     return f"\U0001F5D1 Removed {name} — now watching {len(remaining)} channels."
 
 
-def handle_command(nsubj, body, sender, orig_subject, orig_msgid, dry=False):
-    text = f"{nsubj}\n{body}".strip()
+def handle_command(command_text, dry=False):
+    text = command_text.strip()
     low = text.lower()
     channels = load_channels()
     pending = load_pending()
@@ -576,14 +610,11 @@ def handle_command(nsubj, body, sender, orig_subject, orig_msgid, dry=False):
         elif re.search(r"\b(delete|remove|stop)\b", low):
             reply = cmd_delete_prompt(channels)
         else:
-            reply = "Reply with the number or name to delete (or 'yt list' to see them)."
+            reply = "Reply with the number or name to delete (or 'list' to see them)."
     else:
-        reply = (
-            "Sorry, I didn't recognize that. Use:\n"
-            "  yt add <link>   |   yt list   |   yt delete"
-        )
+        reply = "I didn't catch that. Reply with:\n  add <link>   |   list   |   delete"
 
-    send_reply(sender, orig_subject, orig_msgid, reply, dry=dry)
+    send_threaded(reply, dry=dry)
 
 
 def run_commands(dry=False):
@@ -592,33 +623,54 @@ def run_commands(dry=False):
     allow = {a.strip().lower() for a in env("ALLOWLIST_SENDERS").split(",") if a.strip()}
     processed = set(load_json(PROCESSED_FILE, []))
 
+    # Message-IDs in our one canonical thread — a reply referencing any of them is a
+    # command, so the user can just reply in the thread (chat-style) with no `yt` subject.
+    thread = load_json(THREAD_FILE, {})
+    base_subject = thread.get("base_subject", UPDATES_SUBJECT).strip().lower()
+    thread_ids = set(thread.get("references", []))
+    for key in ("root_message_id", "last_message_id"):
+        if thread.get(key):
+            thread_ids.add(thread[key])
+
     mailbox = imaplib.IMAP4_SSL("imap.gmail.com", 993)
     mailbox.login(addr, password)
     mailbox.select("INBOX")
-    # Search recent `yt`-subject mail (read OR unread) and dedupe via processed_emails.json.
-    # Not UNSEEN-only: the user opening the mail — or Gmail auto-reading self-sent mail —
-    # would otherwise hide a valid command.
+
+    # Recent mail from allowlisted senders (read or unread); dedupe via processed_emails.json.
     since = (datetime.datetime.now(PACIFIC) - datetime.timedelta(days=3)).strftime("%d-%b-%Y")
-    _, data = mailbox.search(None, "SINCE", since, "SUBJECT", "yt")
-    msg_nums = data[0].split()
+    msg_nums, seen_nums = [], set()
+    for sender_addr in allow:
+        _, data = mailbox.search(None, "SINCE", since, "FROM", sender_addr)
+        msg_nums.extend(data[0].split())
 
     for num in msg_nums:
+        if num in seen_nums:
+            continue
+        seen_nums.add(num)
         _, fetched = mailbox.fetch(num, "(BODY.PEEK[])")
         message = email.message_from_bytes(fetched[0][1], policy=policy.default)
-        if message.get("X-YT-Watcher"):  # our own outgoing mail — never treat as a command
+        if message.get("X-YT-Watcher"):  # our own outgoing mail — never a command
             continue
         msgid = message.get("Message-ID", "")
         if msgid and msgid in processed:
             continue
         sender = parseaddr(message.get("From", ""))[1].lower()
-        subject = message.get("Subject", "")
-        nsubj = normalize_subject(subject)
-        if sender not in allow or not nsubj.lower().startswith("yt"):
+        if sender not in allow:
             continue
 
+        nsubj = normalize_subject(message.get("Subject", ""))
         body = get_text_body(message)
-        print(f"command from {sender}: {nsubj!r}")
-        handle_command(nsubj, body, sender, subject, msgid, dry=dry)
+        if nsubj.lower().startswith("yt"):                   # a fresh "yt ..." email
+            command_text = f"{nsubj}\n{body}"
+        elif nsubj.strip().lower() == base_subject or (thread_ids & header_refs(message)):
+            command_text = extract_reply_text(body)          # a reply inside our thread
+        else:
+            continue
+        if not command_text.strip():
+            continue
+
+        print(f"command from {sender}: {command_text.strip().splitlines()[0][:60]!r}")
+        handle_command(command_text, dry=dry)
 
         if not dry:
             mailbox.store(num, "+FLAGS", "\\Seen")

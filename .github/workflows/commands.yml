@@ -24,6 +24,9 @@ jobs:
       - name: Process commands
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          RESEND_FROM: ${{ secrets.RESEND_FROM }}
+          RECIPIENT: ${{ secrets.RECIPIENT }}
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           ALLOWLIST_SENDERS: ${{ secrets.ALLOWLIST_SENDERS }}

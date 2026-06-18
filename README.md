@@ -37,7 +37,10 @@ Only emails from `ALLOWLIST_SENDERS` are acted on.
 3. Create a **public** GitHub repo and push this project.
 4. Add repo **secrets** (Settings → Secrets and variables → Actions):
    - `ANTHROPIC_API_KEY`
-   - `GMAIL_ADDRESS` = `kkamalvanshi@gmail.com`
+   - `RESEND_API_KEY` = your Resend API key (sending, so mail arrives from a distinct sender)
+   - `RESEND_FROM` = `YouTube Watcher <onboarding@resend.dev>`
+   - `RECIPIENT` = `kkamalvanshi@gmail.com` (where summaries are sent)
+   - `GMAIL_ADDRESS` = `kkamalvanshi@gmail.com` (inbox the command listener reads via IMAP)
    - `GMAIL_APP_PASSWORD` = the 16-char app password
    - `ALLOWLIST_SENDERS` = `kkamalvanshi@gmail.com`
    - `WEBSHARE_PROXY_USERNAME` = Webshare **residential** proxy username (for full transcripts)
