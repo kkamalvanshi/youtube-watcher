@@ -30,6 +30,8 @@ jobs:
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           ALLOWLIST_SENDERS: ${{ secrets.ALLOWLIST_SENDERS }}
+          WEBSHARE_PROXY_USERNAME: ${{ secrets.WEBSHARE_PROXY_USERNAME }}
+          WEBSHARE_PROXY_PASSWORD: ${{ secrets.WEBSHARE_PROXY_PASSWORD }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             python watcher.py --mode digest --force

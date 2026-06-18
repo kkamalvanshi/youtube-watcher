@@ -40,6 +40,8 @@ Only emails from `ALLOWLIST_SENDERS` are acted on.
    - `GMAIL_ADDRESS` = `kkamalvanshi@gmail.com`
    - `GMAIL_APP_PASSWORD` = the 16-char app password
    - `ALLOWLIST_SENDERS` = `kkamalvanshi@gmail.com`
+   - `WEBSHARE_PROXY_USERNAME` = Webshare **residential** proxy username (for full transcripts)
+   - `WEBSHARE_PROXY_PASSWORD` = Webshare **residential** proxy password (for full transcripts)
 5. (Optional) Enable the two workflows under the repo's **Actions** tab.
 
 The first daily run summarizes each channel's **current latest** video once (a

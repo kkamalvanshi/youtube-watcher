@@ -174,17 +174,33 @@ def entry_description(entry):
     return entry.get("summary") or entry.get("media_description") or ""
 
 
-def get_transcript(video_id):
-    """Return the transcript text, or None if unavailable (captions off / IP blocked)."""
-    try:
-        from youtube_transcript_api import YouTubeTranscriptApi
+def _build_transcript_api():
+    """Build a YouTubeTranscriptApi, routed through Webshare residential proxies
+    when WEBSHARE_PROXY_USERNAME / WEBSHARE_PROXY_PASSWORD are set."""
+    from youtube_transcript_api import YouTubeTranscriptApi
 
-        try:  # youtube-transcript-api >= 1.0 (instance API)
-            fetched = YouTubeTranscriptApi().fetch(video_id)
-            return " ".join(snippet.text for snippet in fetched)
-        except AttributeError:  # older classmethod API
-            data = YouTubeTranscriptApi.get_transcript(video_id)
-            return " ".join(chunk["text"] for chunk in data)
+    proxy_user = os.environ.get("WEBSHARE_PROXY_USERNAME")
+    proxy_pass = os.environ.get("WEBSHARE_PROXY_PASSWORD")
+    if proxy_user and proxy_pass:
+        from youtube_transcript_api.proxies import WebshareProxyConfig
+
+        return YouTubeTranscriptApi(
+            proxy_config=WebshareProxyConfig(
+                proxy_username=proxy_user, proxy_password=proxy_pass
+            )
+        )
+    return YouTubeTranscriptApi()
+
+
+def get_transcript(video_id):
+    """Return the transcript text, or None if unavailable.
+
+    Uses a Webshare residential proxy when configured (required to fetch transcripts
+    from cloud IPs such as GitHub Actions runners); otherwise tries a direct request.
+    """
+    try:
+        fetched = _build_transcript_api().fetch(video_id)
+        return " ".join(snippet.text for snippet in fetched)
     except Exception as exc:  # noqa: BLE001 - any failure -> fall back to description
         print(f"  transcript unavailable for {video_id}: {exc}")
         return None
