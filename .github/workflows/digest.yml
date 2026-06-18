@@ -1,0 +1,50 @@
+name: Daily digest
+
+on:
+  schedule:
+    # GitHub cron is UTC with no DST handling. Fire at both 15:00 and 16:00 UTC;
+    # watcher.py proceeds only when it's actually 08:00 America/Los_Angeles.
+    - cron: "0 15 * * *"
+    - cron: "0 16 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: yt-watcher-state
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Run digest
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALLOWLIST_SENDERS: ${{ secrets.ALLOWLIST_SENDERS }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            python watcher.py --mode digest --force
+          else
+            python watcher.py --mode digest
+          fi
+      - name: Commit summaries & state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes."
+          else
+            git commit -m "digest: update summaries & state"
+            git pull --rebase --autostash || true
+            git push
+          fi
