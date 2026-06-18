@@ -98,6 +98,13 @@ Indent each deeper level by exactly 2 spaces and start every bullet with "- ", e
   - (for any routine / recipe / how-to, list every step in order with specifics)
 (continue through the ENTIRE video — do not skip sections; nest down to 4 levels when it adds clarity)
 
+Emphasis (use SPARINGLY — restraint matters, do not over-bold):
+- **Bold** only a FEW of the most important items — the single key number, name, or
+  takeaway in a section, not every term. At most one or two bolds per section, and many
+  sections need none. Over-bolding makes the page noisy and is worse than no bolding.
+- Optionally use a Markdown blockquote (a line starting with "> ") to call out the one
+  biggest insight of the whole video — at most once or twice in the ENTIRE summary.
+
 Rules:
 - `tldr` = the Executive Summary text (20-40 words, plain text, no markdown headers).
 - Put ALL detail (including the full process/steps) in `markdown` — the email body only
@@ -328,8 +335,28 @@ def send_threaded(body, attachment=None, dry=False):
 # --------------------------------------------------------------------------- #
 # Summary file
 # --------------------------------------------------------------------------- #
+_PDF_CSS = """
+@page { size: letter; margin: 1.4cm 1.5cm 1.5cm 1.5cm; }
+body { font-family: Helvetica, Arial, sans-serif; font-size: 12.5px; line-height: 1.5; color: #2b2b33; }
+.hdr { background-color: #111827; padding: 16px 18px; margin-bottom: 16px; }
+.title { color: #ffffff; font-size: 22px; font-weight: bold; }
+.meta { color: #9ca3af; font-size: 10.5px; margin-top: 7px; }
+.exec { background-color: #eef4ff; border-left: 5px solid #2563eb; padding: 11px 14px; margin: 4px 0 16px 0; font-size: 13.5px; color: #15233b; }
+h2 { color: #1d4ed8; font-size: 16px; margin: 20px 0 8px 0; border-bottom: 2px solid #bfdbfe; padding-bottom: 4px; }
+h3 { color: #111827; font-size: 13.5px; margin: 13px 0 4px 0; }
+p { margin: 5px 0; }
+ul { margin: 4px 0 9px 0; padding-left: 18px; }
+li { margin: 3px 0; }
+strong { color: #b45309; font-weight: bold; }
+em { color: #6d28d9; font-style: italic; }
+blockquote { background-color: #f0f7ff; border-left: 4px solid #2563eb; margin: 10px 0; padding: 8px 13px; color: #1e3a5f; }
+"""
+
+
 def write_summary_pdf(channel_name, video_id, title, markdown_text, published_date):
-    """Render the markdown summary to a PDF and return its path."""
+    """Render the markdown summary into a styled, readable PDF and return its path."""
+    import re as _re
+    from html import escape
     import markdown as md_lib
     from xhtml2pdf import pisa
 
@@ -337,17 +364,36 @@ def write_summary_pdf(channel_name, video_id, title, markdown_text, published_da
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{published_date}-{video_id}-{slugify(title)}.pdf"
 
-    html_body = md_lib.markdown(markdown_text, extensions=["extra", "sane_lists"])
+    # Drop emoji (the built-in PDF fonts can't render them and they leave gaps).
+    emoji = _re.compile(
+        "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U00002B00-\U00002BFF"
+        "\U0001F1E6-\U0001F1FF\U00002190-\U000021FF\U0000FE00-\U0000FE0F]"
+    )
+    lines = emoji.sub("", markdown_text).splitlines()
+
+    # Pull the title + meta lines (everything before the first "## ") into a styled
+    # header; render the rest of the markdown as the body.
+    doc_title, meta_parts, body_start = "", [], len(lines)
+    for i, ln in enumerate(lines):
+        if ln.startswith("## "):
+            body_start = i
+            break
+        s = ln.strip()
+        if s.startswith("# ") and not doc_title:
+            doc_title = s[2:].strip()
+        elif s:
+            meta_parts.append(s.replace("**", ""))
+    body_md = "\n".join(lines[body_start:])
+
+    header = f'<div class="hdr"><div class="title">{escape(doc_title or title)}</div>'
+    if meta_parts:
+        header += f'<div class="meta">{escape(" ".join(meta_parts))}</div>'
+    header += "</div>"
+
+    body_html = md_lib.markdown(body_md, extensions=["extra", "sane_lists"])
     html = (
-        "<html><head><meta charset='utf-8'><style>"
-        "body{font-family:Helvetica,Arial,sans-serif;font-size:10.5px;line-height:1.45;color:#222;}"
-        "h1{font-size:17px;margin:0 0 4px;}"
-        "h2{font-size:13px;margin:12px 0 4px;border-bottom:1px solid #cccccc;padding-bottom:2px;}"
-        "h3{font-size:11.5px;margin:9px 0 3px;}"
-        "ul{margin:2px 0;padding-left:16px;}"
-        "li{margin:1px 0;}"
-        "p{margin:3px 0;}"
-        "</style></head><body>" + html_body + "</body></html>"
+        "<html><head><meta charset='utf-8'><style>" + _PDF_CSS + "</style></head>"
+        "<body>" + header + body_html + "</body></html>"
     )
     with open(path, "wb") as fh:
         status = pisa.CreatePDF(src=html, dest=fh, encoding="utf-8")
