@@ -239,7 +239,7 @@ def resolve_channel_id(url):
 # Claude summarization
 # --------------------------------------------------------------------------- #
 def summarize(title, channel, url, published, source, content):
-    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY
+    client = anthropic.Anthropic(max_retries=4)  # reads ANTHROPIC_API_KEY; retry transient errors
     label = "TRANSCRIPT" if source.startswith("full") else "DESCRIPTION"
     user = (
         f"Title: {title}\n"
@@ -471,15 +471,20 @@ def run_digest(force=False, dry=False):
                     break
                 new_entries.append(entry)
 
-        # Process oldest -> newest so the email thread reads chronologically.
+        # Process oldest -> newest; only advance last-seen PAST videos that actually
+        # sent, so a transient failure retries next run instead of silently skipping.
         for entry in reversed(new_entries):
-            process_new_video(name, entry, dry=dry)
-
-        last_seen[cid] = entry_video_id(entries[0])
+            try:
+                process_new_video(name, entry, dry=dry)
+            except Exception as exc:  # noqa: BLE001
+                print(f"  failed on {entry_video_id(entry)}: {exc} — will retry next run")
+                break
+            if not dry:
+                last_seen[cid] = entry_video_id(entry)
+                save_json(LAST_SEEN_FILE, last_seen)
         time.sleep(1)  # be gentle to YouTube from a single runner IP
 
     if not dry:
-        save_json(LAST_SEEN_FILE, last_seen)
         LAST_CHECKED_FILE.write_text(datetime.datetime.now(PACIFIC).isoformat() + "\n")
 
 
