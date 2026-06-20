@@ -359,8 +359,9 @@ def summarize(title, channel, url, published, source, content):
 # --------------------------------------------------------------------------- #
 # Email out (SMTP)
 # --------------------------------------------------------------------------- #
-def resend_send(subject, text_body, headers, reply_to, attachment=None):
-    """Send one email via the Resend HTTP API (https://resend.com)."""
+def resend_send(subject, text_body, headers, reply_to, attachments=None):
+    """Send one email via the Resend HTTP API (https://resend.com). `attachments` is a
+    list of file paths, all attached to the single message."""
     import base64
 
     api_key = env("RESEND_API_KEY")
@@ -374,12 +375,10 @@ def resend_send(subject, text_body, headers, reply_to, attachment=None):
         "text": text_body,
         "headers": headers,
     }
-    if attachment is not None:
+    if attachments:
         payload["attachments"] = [
-            {
-                "filename": attachment.name,
-                "content": base64.b64encode(attachment.read_bytes()).decode(),
-            }
+            {"filename": a.name, "content": base64.b64encode(a.read_bytes()).decode()}
+            for a in attachments
         ]
     resp = requests.post(
         "https://api.resend.com/emails",
@@ -391,13 +390,13 @@ def resend_send(subject, text_body, headers, reply_to, attachment=None):
     return resp.json()
 
 
-def send_threaded(body, attachment=None, dry=False):
-    """Send a message into the single canonical conversation thread, via Resend.
+def send_threaded(body, attachments=None, subject=None, dry=False):
+    """Send an email via Resend into the YouTube-watcher conversation.
 
-    Sends from a distinct address (so it arrives as normal inbox mail, not 'from me'),
-    with Reply-To set to your address so your in-thread replies route back to the
-    Gmail inbox the command listener reads. Tagged X-YT-Watcher to avoid re-ingestion.
-    All bot mail uses one constant subject so Gmail keeps it in a single conversation.
+    From a distinct address (so it lands in the inbox as normal mail, not 'from me'),
+    Reply-To set to your address so replies route to the Gmail inbox the listener reads,
+    tagged X-YT-Watcher to avoid re-ingestion. `subject` overrides the base subject (used
+    for the dated daily digest); `attachments` is a list of file paths.
     """
     recipient = os.environ.get("RECIPIENT") or env("GMAIL_ADDRESS")
     thread = load_json(THREAD_FILE, {})
@@ -412,12 +411,13 @@ def send_threaded(body, attachment=None, dry=False):
         headers["References"] = " ".join(refs)
 
     if dry:
-        print("---- DRY-RUN THREADED EMAIL (Resend) ----")
-        print("Subject:", base_subject)
+        print("---- DRY-RUN EMAIL (Resend) ----")
+        print("Subject:", subject or base_subject)
         print(body)
         return
 
-    resend_send(base_subject, body + footer(), headers, reply_to=recipient, attachment=attachment)
+    resend_send(subject or base_subject, body + footer(), headers,
+                reply_to=recipient, attachments=attachments)
     thread.setdefault("base_subject", base_subject)
     thread.setdefault("root_message_id", new_id)
     thread["last_message_id"] = new_id
@@ -504,7 +504,8 @@ def write_summary_pdf(channel_name, video_id, title, markdown_text, published_da
 # --------------------------------------------------------------------------- #
 # Digest mode
 # --------------------------------------------------------------------------- #
-def process_new_video(channel_name, entry, dry=False):
+def summarize_video(channel_name, entry):
+    """Summarize one video and render its PDF; return a dict. Does NOT send email."""
     video_id = entry_video_id(entry)
     title = entry.get("title", "Untitled")
     url = entry.get("link") or f"https://www.youtube.com/watch?v={video_id}"
@@ -527,17 +528,36 @@ def process_new_video(channel_name, entry, dry=False):
     print(f"  summarizing '{title}' ({source})")
     result = summarize(title, channel_name, url, published_human, source, content)
     path = write_summary_pdf(channel_name, video_id, title, result["markdown"], published_date)
+    return {
+        "channel": channel_name, "title": title, "url": url,
+        "published": published_human, "tldr": result["tldr"], "pdf": path,
+    }
 
-    body = (
-        f'\U0001F3AC {channel_name} — "{title}"\n\n'
-        f"▶  {url}\n"
-        f"\U0001F5D3  Published {published_human}\n\n"
-        f"TL;DR\n{result['tldr']}\n\n"
-        f"Full summary — executive summary + detailed breakdown — is in the attached PDF:\n{path.name}\n"
-    )
 
-    send_threaded(body, attachment=path, dry=dry)
-    print(f"  wrote {path} and emailed it")
+def send_digest_email(items, dry=False):
+    """Send ONE email covering all `items` for the day — date in the subject, every PDF
+    attached. Each item is {channel, title, url, published, tldr, pdf}."""
+    date_str = datetime.datetime.now(PACIFIC).strftime("%B %-d, %Y")
+    n = len(items)
+    head = f"{n} new video{'s' if n != 1 else ''} — {date_str}\n\n"
+    blocks = []
+    for it in items:
+        blocks.append(
+            f'\U0001F3AC {it["channel"]} — "{it["title"]}"\n'
+            f'▶  {it["url"]}\n'
+            f'TL;DR  {it["tldr"]}\n'
+            f'\U0001F4C4 Full summary attached: {it["pdf"].name}'
+        )
+    body = head + "\n\n──────────\n\n".join(blocks) + "\n"
+    subject = f"{UPDATES_SUBJECT} — {date_str}"
+    send_threaded(body, attachments=[it["pdf"] for it in items], subject=subject, dry=dry)
+
+
+def process_new_video(channel_name, entry, dry=False):
+    """Summarize + email a single video (a one-item dated digest)."""
+    item = summarize_video(channel_name, entry)
+    send_digest_email([item], dry=dry)
+    print(f"  wrote {item['pdf']} and emailed it")
 
 
 def run_digest(force=False, dry=False):
@@ -549,6 +569,8 @@ def run_digest(force=False, dry=False):
 
     channels = load_channels()
     last_seen = load_json(LAST_SEEN_FILE, {})
+    items = []        # all new videos across channels, summarized
+    advance = {}      # channel_id -> newest video id to mark seen (only fully summarized)
 
     for channel in channels:
         cid = channel["channel_id"]
@@ -570,20 +592,28 @@ def run_digest(force=False, dry=False):
                     break
                 new_entries.append(entry)
 
-        # Process oldest -> newest; only advance last-seen PAST videos that actually
-        # sent, so a transient failure retries next run instead of silently skipping.
+        # Oldest -> newest; collect summaries. A channel's last-seen advances only to
+        # its last successfully-summarized video (after the email sends), so a transient
+        # failure retries next run instead of skipping.
         for entry in reversed(new_entries):
             try:
-                process_new_video(name, entry, dry=dry)
+                items.append(summarize_video(name, entry))
+                advance[cid] = entry_video_id(entry)
             except Exception as exc:  # noqa: BLE001
                 print(f"  failed on {entry_video_id(entry)}: {exc} — will retry next run")
                 break
-            if not dry:
-                last_seen[cid] = entry_video_id(entry)
-                save_json(LAST_SEEN_FILE, last_seen)
         time.sleep(1)  # be gentle to YouTube from a single runner IP
 
+    if items:
+        send_digest_email(items, dry=dry)  # ONE email for the whole day's batch
+        print(f"sent {len(items)} video(s) in one digest email")
+    else:
+        print("No new videos.")
+
     if not dry:
+        for cid, vid in advance.items():
+            last_seen[cid] = vid
+        save_json(LAST_SEEN_FILE, last_seen)
         LAST_CHECKED_FILE.write_text(datetime.datetime.now(PACIFIC).isoformat() + "\n")
 
 
@@ -812,7 +842,7 @@ def run_commands(dry=False):
         body = get_text_body(message)
         if nsubj.lower().startswith("yt"):                   # a fresh "yt ..." email
             command_text = f"{nsubj}\n{body}"
-        elif nsubj.strip().lower() == base_subject or (thread_ids & header_refs(message)):
+        elif nsubj.strip().lower().startswith(base_subject) or (thread_ids & header_refs(message)):
             command_text = extract_reply_text(body)          # a reply inside our thread
         else:
             continue
