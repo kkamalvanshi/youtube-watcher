@@ -88,8 +88,14 @@ topic/segment of the video its OWN `##` heading, PREFIXED WITH ONE RELEVANT EMOJ
 order it appears, covering the ENTIRE video (one `##` per topic; never skip or merge topics).
 Every `##` heading (Executive Summary, Contents, and each topic) begins with a fitting emoji.
 
-Under each topic heading, put the details as nested bullets UP TO FOUR LEVELS DEEP
-(2-space indent per level, every bullet starts with "- "). Be COMPREHENSIVE — detailed
+Timestamps: the transcript is provided with [t=<seconds>s] markers showing when each part
+is said. End EVERY topic `##` heading with a clickable timestamp link to where that topic
+STARTS, built from the Watch URL plus the start second — e.g.
+"## 📊 Rule 1: Track Everything [2:34](<watch-url>&t=154s)" (154 = the start second from the
+nearest [t=...s] marker; display it as M:SS or H:MM:SS). If the source is description-only
+(no [t=...s] markers), omit the timestamp links.
+
+Under each topic heading, put the details as nested bullets. Be COMPREHENSIVE — detailed
 enough that the reader gets the full value WITHOUT watching. For each topic capture:
 - Each distinct point/claim AND the reasoning/evidence behind it (the "why" and "how").
 - Concrete specifics: every number, statistic, price, percentage, date, and metric.
@@ -98,16 +104,34 @@ enough that the reader gets the full value WITHOUT watching. For each topic capt
 - Tools, products, books, resources, links, companies, and people mentioned.
 - Notable short verbatim quotes; caveats and counterpoints; takeaways as explicit steps.
 
+Bullet nesting (IMPORTANT — get the indentation exactly right):
+- Use nested bullets up to FOUR levels deep; every bullet starts with "- ".
+- Indent each deeper level by EXACTLY 4 SPACES relative to its parent (NOT 2 spaces) —
+  4-space indentation is REQUIRED or the nesting renders flat.
+- NEVER cram a sequence into one bullet as "1. ... 2. ... 3. ...". Put each step/item on
+  its OWN nested bullet line instead.
+
+Tables: if a table communicates something better than bullets (comparisons, before/after,
+plans, schedules, numeric data), use a GitHub-style Markdown table for that part instead.
+
 Do NOT compress away specifics. For a full transcript aim for ~2,500-4,000 words total
 (more if dense); never sacrifice completeness for brevity. For a description-only source,
 be as complete as the source allows (no padding).
 
-Example of a topic section:
+Example of a topic section (note the 4-space indents and the timestamp link):
 
-## Rule 1: Track Everything
-- <main point or claim>
-  - <reasoning / evidence / explanation>
-    - <specific number, example, quote, or sub-step>
+## 📊 Rule 1: Track Everything [2:34](https://www.youtube.com/watch?v=ID&t=154s)
+- Main point or claim
+    - The reasoning / evidence / explanation
+        - Specific number, example, quote, or sub-step
+- A process — each step its OWN sub-bullet (never inline "1. 2. 3."):
+    - Step 1 — ...
+    - Step 2 — ...
+
+| When useful, a table | like this |
+| --- | --- |
+| Calories | bodyweight × 10 |
+| Protein | bodyweight × 1 g |
 
 Emphasis (use SPARINGLY — restraint matters, do not over-bold):
 - **Bold** only a FEW of the most important items — the single key number, name, or
@@ -211,49 +235,73 @@ def _build_transcript_api():
     return YouTubeTranscriptApi()
 
 
-def _supadata_transcript(video_id):
-    """Fetch a transcript via the Supadata API (server-side, no proxy needed).
-
-    Returns plain transcript text, or None if no key is set or no transcript exists.
-    """
+def _supadata_segments(video_id):
+    """Timestamped transcript via the Supadata API: list of (start_seconds, text)."""
     api_key = os.environ.get("SUPADATA_API_KEY")
     if not api_key:
         return None
     resp = requests.get(
         "https://api.supadata.ai/v1/youtube/transcript",
-        params={"url": f"https://www.youtube.com/watch?v={video_id}", "text": "true"},
+        params={"url": f"https://www.youtube.com/watch?v={video_id}"},  # segmented (no text=true)
         headers={"x-api-key": api_key},
         timeout=90,
     )
     resp.raise_for_status()
-    data = resp.json()
-    content = data.get("content")
-    if isinstance(content, list):  # segmented form: [{text, ...}, ...]
-        content = " ".join(seg.get("text", "") for seg in content)
-    if isinstance(content, str) and content.strip():
-        return content
-    return None
+    content = resp.json().get("content")
+    if not isinstance(content, list):
+        return None
+    segs = []
+    for seg in content:
+        text = (seg.get("text") or "").strip()
+        if text:
+            segs.append((float(seg.get("offset", 0)) / 1000.0, text))  # offset is milliseconds
+    return segs or None
+
+
+def _yta_segments(video_id):
+    """Fallback timestamped transcript via youtube-transcript-api: (start_seconds, text)."""
+    fetched = _build_transcript_api().fetch(video_id)
+    segs = []
+    for sn in fetched:
+        text = (getattr(sn, "text", "") or "").strip()
+        if text:
+            segs.append((float(getattr(sn, "start", 0.0)), text))
+    return segs or None
+
+
+def _format_timestamped(segments, chunk_seconds=20):
+    """Coalesce (start, text) segments into ~chunk_seconds lines prefixed with [t=<sec>s]."""
+    lines, start, buf = [], None, []
+    for seg_start, text in segments:
+        if start is None:
+            start = seg_start
+        buf.append(text)
+        if seg_start - start >= chunk_seconds:
+            lines.append(f"[t={int(start)}s] " + " ".join(buf))
+            start, buf = None, []
+    if buf:
+        lines.append(f"[t={int(start)}s] " + " ".join(buf))
+    return "\n".join(lines)
 
 
 def get_transcript(video_id):
-    """Return transcript text, or None if unavailable.
+    """Return a TIMESTAMPED transcript (lines prefixed with [t=<sec>s]) or None.
 
     Prefers Supadata (reliable, server-side — no IP bans); falls back to
-    youtube-transcript-api (direct/proxy). The caller uses the video description
-    if both fail.
+    youtube-transcript-api. The caller uses the video description if both fail.
     """
+    segments = None
     try:
-        text = _supadata_transcript(video_id)
-        if text:
-            return text
+        segments = _supadata_segments(video_id)
     except Exception as exc:  # noqa: BLE001
         print(f"  Supadata transcript failed for {video_id}: {exc}")
-    try:
-        fetched = _build_transcript_api().fetch(video_id)
-        return " ".join(snippet.text for snippet in fetched)
-    except Exception as exc:  # noqa: BLE001 - any failure -> fall back to description
-        print(f"  transcript unavailable for {video_id}: {exc}")
-        return None
+    if not segments:
+        try:
+            segments = _yta_segments(video_id)
+        except Exception as exc:  # noqa: BLE001 - fall back to description
+            print(f"  transcript unavailable for {video_id}: {exc}")
+            return None
+    return _format_timestamped(segments) if segments else None
 
 
 def resolve_channel_id(url):
@@ -392,6 +440,10 @@ li { margin: 3px 0; }
 strong { color: #b45309; font-weight: bold; }
 em { color: #6d28d9; font-style: italic; }
 blockquote { background-color: #f0f7ff; border-left: 4px solid #2563eb; margin: 10px 0; padding: 8px 13px; color: #1e3a5f; }
+table { border-collapse: collapse; margin: 9px 0; font-size: 13.5px; }
+th, td { border: 1px solid #cbd5e1; padding: 5px 9px; text-align: left; vertical-align: top; }
+th { background-color: #eef4ff; color: #15233b; }
+a { color: #2563eb; }
 """
 
 
