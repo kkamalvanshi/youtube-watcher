@@ -79,39 +79,30 @@ proportionally shorter breakdown — do NOT pad or fabricate to reach a word cou
 ## Executive Summary
 A 20-40 word overview — the single big-picture point of the video.
 
-## Detailed Breakdown
-A COMPREHENSIVE, section-by-section outline — detailed enough that the reader gets the
-full value of the video WITHOUT watching it. Go through the ENTIRE video in order and,
-for every segment, capture all of:
-- Each distinct point or claim AND the reasoning/evidence behind it — the "why" and
-  "how", not just the conclusion.
+After the Executive Summary, go STRAIGHT into the topics — do NOT output a "Detailed
+Breakdown" heading. Give EACH topic/segment of the video its OWN `##` heading, in the
+order it appears, covering the ENTIRE video (one `##` per topic; never skip or merge topics).
+
+Under each topic heading, put the details as nested bullets UP TO FOUR LEVELS DEEP
+(2-space indent per level, every bullet starts with "- "). Be COMPREHENSIVE — detailed
+enough that the reader gets the full value WITHOUT watching. For each topic capture:
+- Each distinct point/claim AND the reasoning/evidence behind it (the "why" and "how").
 - Concrete specifics: every number, statistic, price, percentage, date, and metric.
-- Examples, stories, anecdotes, case studies, and analogies used to make each point.
-- Any framework, mental model, or process — list EVERY step in order with its specifics.
+- Examples, stories, anecdotes, case studies, and analogies.
+- Any framework or process — list EVERY step in order with its specifics.
 - Tools, products, books, resources, links, companies, and people mentioned.
-- Notable lines worth keeping as short verbatim quotes.
-- Caveats, counterpoints, exceptions, and nuances.
-- Concrete, actionable takeaways stated as explicit steps.
+- Notable short verbatim quotes; caveats and counterpoints; takeaways as explicit steps.
 
-Do NOT compress or generalize away specifics — preserve the concrete details. Match the
-length to the video's density: for a full transcript aim for roughly 2,500-4,000 words
-(more if the video is long or dense); never sacrifice completeness for brevity. For a
-description-only source, be as complete as the source genuinely allows (no padding).
+Do NOT compress away specifics. For a full transcript aim for ~2,500-4,000 words total
+(more if dense); never sacrifice completeness for brevity. For a description-only source,
+be as complete as the source allows (no padding).
 
-Format — give EACH topic/segment its OWN `###` subheading (so the page is easy to scan),
-then put its details as nested bullets UP TO FOUR LEVELS DEEP (2-space indent per level,
-every bullet starts with "- "):
+Example of a topic section:
 
-### <Topic / segment 1 — in order>
+## Rule 1: Track Everything
 - <main point or claim>
-  - <the reasoning / evidence / explanation>
+  - <reasoning / evidence / explanation>
     - <specific number, example, quote, or sub-step>
-
-### <Topic / segment 2>
-- <main point>
-  - (for any routine / recipe / how-to, list every step in order with exact specifics)
-
-(one ### heading per topic, in order through the ENTIRE video — do not skip or merge topics)
 
 Emphasis (use SPARINGLY — restraint matters, do not over-bold):
 - **Bold** only a FEW of the most important items — the single key number, name, or
@@ -384,13 +375,13 @@ def send_threaded(body, attachment=None, dry=False):
 # --------------------------------------------------------------------------- #
 _PDF_CSS = """
 @page { size: letter; margin: 1.4cm 1.5cm 1.5cm 1.5cm; }
-body { font-family: Helvetica, Arial, sans-serif; font-size: 12.5px; line-height: 1.5; color: #2b2b33; }
+body { font-family: Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.5; color: #2b2b33; }
 .hdr { background-color: #111827; padding: 16px 18px; margin-bottom: 16px; }
-.title { color: #ffffff; font-size: 22px; font-weight: bold; }
-.meta { color: #9ca3af; font-size: 10.5px; margin-top: 7px; }
-.exec { background-color: #eef4ff; border-left: 5px solid #2563eb; padding: 11px 14px; margin: 4px 0 16px 0; font-size: 13.5px; color: #15233b; }
-h2 { color: #1d4ed8; font-size: 16px; margin: 20px 0 8px 0; border-bottom: 2px solid #bfdbfe; padding-bottom: 4px; }
-h3 { color: #334155; font-size: 14px; margin: 16px 0 5px 0; }
+.title { color: #ffffff; font-size: 25px; font-weight: bold; }
+.meta { color: #9ca3af; font-size: 12px; margin-top: 7px; }
+.exec { background-color: #eef4ff; border-left: 5px solid #2563eb; padding: 11px 14px; margin: 4px 0 16px 0; font-size: 15.5px; color: #15233b; }
+h2 { color: #1d4ed8; font-size: 18px; margin: 20px 0 8px 0; border-bottom: 2px solid #bfdbfe; padding-bottom: 4px; }
+h3 { color: #334155; font-size: 16px; margin: 16px 0 5px 0; }
 p { margin: 5px 0; }
 ul { margin: 4px 0 9px 0; padding-left: 18px; }
 li { margin: 3px 0; }
