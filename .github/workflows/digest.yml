@@ -24,6 +24,10 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
+      - name: Install Chromium for PDF rendering
+        run: |
+          python -m playwright install --with-deps chromium
+          sudo apt-get install -y fonts-noto-color-emoji
       - name: Run digest
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

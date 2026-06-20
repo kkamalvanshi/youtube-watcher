@@ -76,12 +76,17 @@ proportionally shorter breakdown — do NOT pad or fabricate to reach a word cou
 **Channel:** <name> · **Published:** <date> · **Watch:** <url>
 **Source:** <full transcript | description only>
 
-## Executive Summary
+## 📋 Executive Summary
 A 20-40 word overview — the single big-picture point of the video.
 
-After the Executive Summary, go STRAIGHT into the topics — do NOT output a "Detailed
-Breakdown" heading. Give EACH topic/segment of the video its OWN `##` heading, in the
+## 📑 Contents
+A bulleted list of every topic heading below, in order — titles WITH their emoji, e.g.
+"- 📊 Rule 1: Track Everything". It must match the topic headings exactly.
+
+Then go STRAIGHT into the topics — do NOT output a "Detailed Breakdown" heading. Give EACH
+topic/segment of the video its OWN `##` heading, PREFIXED WITH ONE RELEVANT EMOJI, in the
 order it appears, covering the ENTIRE video (one `##` per topic; never skip or merge topics).
+Every `##` heading (Executive Summary, Contents, and each topic) begins with a fitting emoji.
 
 Under each topic heading, put the details as nested bullets UP TO FOUR LEVELS DEEP
 (2-space indent per level, every bullet starts with "- "). Be COMPREHENSIVE — detailed
@@ -374,8 +379,7 @@ def send_threaded(body, attachment=None, dry=False):
 # Summary file
 # --------------------------------------------------------------------------- #
 _PDF_CSS = """
-@page { size: letter; margin: 1.4cm 1.5cm 1.5cm 1.5cm; }
-body { font-family: Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.5; color: #2b2b33; }
+body { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.55; color: #2b2b33; }
 .hdr { background-color: #111827; padding: 16px 18px; margin-bottom: 16px; }
 .title { color: #ffffff; font-size: 25px; font-weight: bold; }
 .meta { color: #9ca3af; font-size: 12px; margin-top: 7px; }
@@ -392,25 +396,21 @@ blockquote { background-color: #f0f7ff; border-left: 4px solid #2563eb; margin: 
 
 
 def write_summary_pdf(channel_name, video_id, title, markdown_text, published_date):
-    """Render the markdown summary into a styled, readable PDF and return its path."""
-    import re as _re
+    """Render the markdown summary into a styled PDF via headless Chromium.
+
+    Chromium renders color emoji and full CSS. All PDFs go into ONE flat folder
+    (summaries/, no per-channel subfolders), with the channel as a filename prefix.
+    """
     from html import escape
     import markdown as md_lib
-    from xhtml2pdf import pisa
+    from playwright.sync_api import sync_playwright
 
-    directory = SUMMARIES / slugify(channel_name)
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{published_date}-{video_id}-{slugify(title)}.pdf"
+    SUMMARIES.mkdir(parents=True, exist_ok=True)
+    path = SUMMARIES / f"{slugify(channel_name)}-{published_date}-{video_id}-{slugify(title)}.pdf"
 
-    # Drop emoji (the built-in PDF fonts can't render them and they leave gaps).
-    emoji = _re.compile(
-        "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U00002B00-\U00002BFF"
-        "\U0001F1E6-\U0001F1FF\U00002190-\U000021FF\U0000FE00-\U0000FE0F]"
-    )
-    lines = emoji.sub("", markdown_text).splitlines()
-
-    # Pull the title + meta lines (everything before the first "## ") into a styled
-    # header; render the rest of the markdown as the body.
+    # Pull the title + meta lines (everything before the first "## ") into a styled header;
+    # render the rest of the markdown as the body.
+    lines = markdown_text.splitlines()
     doc_title, meta_parts, body_start = "", [], len(lines)
     for i, ln in enumerate(lines):
         if ln.startswith("## "):
@@ -430,13 +430,20 @@ def write_summary_pdf(channel_name, video_id, title, markdown_text, published_da
 
     body_html = md_lib.markdown(body_md, extensions=["extra", "sane_lists"])
     html = (
-        "<html><head><meta charset='utf-8'><style>" + _PDF_CSS + "</style></head>"
+        "<!doctype html><html><head><meta charset='utf-8'><style>" + _PDF_CSS + "</style></head>"
         "<body>" + header + body_html + "</body></html>"
     )
-    with open(path, "wb") as fh:
-        status = pisa.CreatePDF(src=html, dest=fh, encoding="utf-8")
-    if status.err:
-        raise RuntimeError(f"PDF generation failed for {video_id}")
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        page = browser.new_page()
+        page.set_content(html, wait_until="load")
+        page.pdf(
+            path=str(path),
+            format="Letter",
+            print_background=True,
+            margin={"top": "0.6in", "bottom": "0.6in", "left": "0.6in", "right": "0.6in"},
+        )
+        browser.close()
     return path
 
 
