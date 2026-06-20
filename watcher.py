@@ -80,23 +80,34 @@ proportionally shorter breakdown — do NOT pad or fabricate to reach a word cou
 A 20-40 word overview — the single big-picture point of the video.
 
 ## Detailed Breakdown
-A thorough OUTLINE of everything in the video, in order. Full sentences are NOT
-required — fragments and nested bullets are ideal. Cover every topic, argument,
-explanation, example, and number, and lay out the COMPLETE process / steps whenever the
-video has one (sets, reps, amounts, settings, sequence — leave nothing out). When the
-source is a full transcript, aim for ~1000-2000 words here; when it's only a
-description, be as detailed as the source genuinely supports.
+A COMPREHENSIVE, section-by-section outline — detailed enough that the reader gets the
+full value of the video WITHOUT watching it. Go through the ENTIRE video in order and,
+for every segment, capture all of:
+- Each distinct point or claim AND the reasoning/evidence behind it — the "why" and
+  "how", not just the conclusion.
+- Concrete specifics: every number, statistic, price, percentage, date, and metric.
+- Examples, stories, anecdotes, case studies, and analogies used to make each point.
+- Any framework, mental model, or process — list EVERY step in order with its specifics.
+- Tools, products, books, resources, links, companies, and people mentioned.
+- Notable lines worth keeping as short verbatim quotes.
+- Caveats, counterpoints, exceptions, and nuances.
+- Concrete, actionable takeaways stated as explicit steps.
 
-Use nested bullets UP TO FOUR LEVELS DEEP where the content has that structure.
-Indent each deeper level by exactly 2 spaces and start every bullet with "- ", e.g.:
+Do NOT compress or generalize away specifics — preserve the concrete details. Match the
+length to the video's density: for a full transcript aim for roughly 2,500-4,000 words
+(more if the video is long or dense); never sacrifice completeness for brevity. For a
+description-only source, be as complete as the source genuinely allows (no padding).
 
-- <Topic / segment>
-  - <main point>
-    - <sub-point / supporting detail>
-      - <finer detail, number, example, or sub-step>
+Use nested bullets UP TO FOUR LEVELS DEEP (2-space indent per level, every bullet starts
+with "- "):
+
+- <Topic / segment — in order>
+  - <main point or claim>
+    - <the reasoning / evidence / explanation>
+      - <specific number, example, quote, or sub-step>
 - <next Topic / segment>
-  - (for any routine / recipe / how-to, list every step in order with specifics)
-(continue through the ENTIRE video — do not skip sections; nest down to 4 levels when it adds clarity)
+  - (for any routine / recipe / how-to, list every step in order with exact specifics)
+(continue through the ENTIRE video — do not skip or merge sections)
 
 Emphasis (use SPARINGLY — restraint matters, do not over-bold):
 - **Bold** only a FEW of the most important items — the single key number, name, or
@@ -249,14 +260,15 @@ def summarize(title, channel, url, published, source, content):
         f"Summary source: {source}\n\n"
         f"--- {label} ---\n{content}"
     )
-    resp = client.messages.create(
+    with client.messages.stream(
         model=MODEL,
-        max_tokens=16000,
+        max_tokens=20000,
         thinking={"type": "adaptive"},
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user}],
         output_config={"format": {"type": "json_schema", "schema": SUMMARY_SCHEMA}},
-    )
+    ) as stream:
+        resp = stream.get_final_message()
     if resp.stop_reason == "refusal":
         raise RuntimeError("Claude declined to summarize this video.")
     text = next(block.text for block in resp.content if block.type == "text")
