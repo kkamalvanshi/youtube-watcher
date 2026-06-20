@@ -341,7 +341,7 @@ def summarize(title, channel, url, published, source, content):
     )
     with client.messages.stream(
         model=MODEL,
-        max_tokens=20000,
+        max_tokens=32000,
         thinking={"type": "adaptive"},
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user}],
@@ -350,7 +350,9 @@ def summarize(title, channel, url, published, source, content):
         resp = stream.get_final_message()
     if resp.stop_reason == "refusal":
         raise RuntimeError("Claude declined to summarize this video.")
-    text = next(block.text for block in resp.content if block.type == "text")
+    text = next((block.text for block in resp.content if block.type == "text"), None)
+    if not text:
+        raise RuntimeError(f"empty summary response (stop_reason={resp.stop_reason})")
     return json.loads(text)
 
 
