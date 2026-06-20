@@ -211,12 +211,43 @@ def _build_transcript_api():
     return YouTubeTranscriptApi()
 
 
-def get_transcript(video_id):
-    """Return the transcript text, or None if unavailable.
+def _supadata_transcript(video_id):
+    """Fetch a transcript via the Supadata API (server-side, no proxy needed).
 
-    Uses a Webshare residential proxy when configured (required to fetch transcripts
-    from cloud IPs such as GitHub Actions runners); otherwise tries a direct request.
+    Returns plain transcript text, or None if no key is set or no transcript exists.
     """
+    api_key = os.environ.get("SUPADATA_API_KEY")
+    if not api_key:
+        return None
+    resp = requests.get(
+        "https://api.supadata.ai/v1/youtube/transcript",
+        params={"url": f"https://www.youtube.com/watch?v={video_id}", "text": "true"},
+        headers={"x-api-key": api_key},
+        timeout=90,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    content = data.get("content")
+    if isinstance(content, list):  # segmented form: [{text, ...}, ...]
+        content = " ".join(seg.get("text", "") for seg in content)
+    if isinstance(content, str) and content.strip():
+        return content
+    return None
+
+
+def get_transcript(video_id):
+    """Return transcript text, or None if unavailable.
+
+    Prefers Supadata (reliable, server-side — no IP bans); falls back to
+    youtube-transcript-api (direct/proxy). The caller uses the video description
+    if both fail.
+    """
+    try:
+        text = _supadata_transcript(video_id)
+        if text:
+            return text
+    except Exception as exc:  # noqa: BLE001
+        print(f"  Supadata transcript failed for {video_id}: {exc}")
     try:
         fetched = _build_transcript_api().fetch(video_id)
         return " ".join(snippet.text for snippet in fetched)

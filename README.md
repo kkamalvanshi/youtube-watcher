@@ -43,8 +43,9 @@ Only emails from `ALLOWLIST_SENDERS` are acted on.
    - `GMAIL_ADDRESS` = `kkamalvanshi@gmail.com` (inbox the command listener reads via IMAP)
    - `GMAIL_APP_PASSWORD` = the 16-char app password
    - `ALLOWLIST_SENDERS` = `kkamalvanshi@gmail.com`
-   - `WEBSHARE_PROXY_USERNAME` = Webshare **residential** proxy username (for full transcripts)
-   - `WEBSHARE_PROXY_PASSWORD` = Webshare **residential** proxy password (for full transcripts)
+   - `SUPADATA_API_KEY` = Supadata API key — primary transcript source (reliable, no proxy)
+   - `WEBSHARE_PROXY_USERNAME` = Webshare residential proxy username (optional transcript fallback)
+   - `WEBSHARE_PROXY_PASSWORD` = Webshare residential proxy password (optional transcript fallback)
 5. (Optional) Enable the two workflows under the repo's **Actions** tab.
 
 The first daily run summarizes each channel's **current latest** video once (a
