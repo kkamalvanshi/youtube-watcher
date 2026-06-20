@@ -98,16 +98,20 @@ length to the video's density: for a full transcript aim for roughly 2,500-4,000
 (more if the video is long or dense); never sacrifice completeness for brevity. For a
 description-only source, be as complete as the source genuinely allows (no padding).
 
-Use nested bullets UP TO FOUR LEVELS DEEP (2-space indent per level, every bullet starts
-with "- "):
+Format — give EACH topic/segment its OWN `###` subheading (so the page is easy to scan),
+then put its details as nested bullets UP TO FOUR LEVELS DEEP (2-space indent per level,
+every bullet starts with "- "):
 
-- <Topic / segment — in order>
-  - <main point or claim>
-    - <the reasoning / evidence / explanation>
-      - <specific number, example, quote, or sub-step>
-- <next Topic / segment>
+### <Topic / segment 1 — in order>
+- <main point or claim>
+  - <the reasoning / evidence / explanation>
+    - <specific number, example, quote, or sub-step>
+
+### <Topic / segment 2>
+- <main point>
   - (for any routine / recipe / how-to, list every step in order with exact specifics)
-(continue through the ENTIRE video — do not skip or merge sections)
+
+(one ### heading per topic, in order through the ENTIRE video — do not skip or merge topics)
 
 Emphasis (use SPARINGLY — restraint matters, do not over-bold):
 - **Bold** only a FEW of the most important items — the single key number, name, or
@@ -386,7 +390,7 @@ body { font-family: Helvetica, Arial, sans-serif; font-size: 12.5px; line-height
 .meta { color: #9ca3af; font-size: 10.5px; margin-top: 7px; }
 .exec { background-color: #eef4ff; border-left: 5px solid #2563eb; padding: 11px 14px; margin: 4px 0 16px 0; font-size: 13.5px; color: #15233b; }
 h2 { color: #1d4ed8; font-size: 16px; margin: 20px 0 8px 0; border-bottom: 2px solid #bfdbfe; padding-bottom: 4px; }
-h3 { color: #111827; font-size: 13.5px; margin: 13px 0 4px 0; }
+h3 { color: #334155; font-size: 14px; margin: 16px 0 5px 0; }
 p { margin: 5px 0; }
 ul { margin: 4px 0 9px 0; padding-left: 18px; }
 li { margin: 3px 0; }
