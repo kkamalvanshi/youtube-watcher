@@ -342,8 +342,8 @@ def summarize(title, channel, url, published, source, content):
     with client.messages.stream(
         model=MODEL,
         max_tokens=32000,
-        thinking={"type": "adaptive"},
-        system=SYSTEM_PROMPT,
+        thinking={"type": "disabled"},  # summarization is structured extraction; adaptive
+        system=SYSTEM_PROMPT,            # thinking could eat the whole budget on long transcripts
         messages=[{"role": "user", "content": user}],
         output_config={"format": {"type": "json_schema", "schema": SUMMARY_SCHEMA}},
     ) as stream:
