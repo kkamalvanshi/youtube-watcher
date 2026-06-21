@@ -44,6 +44,9 @@ LAST_CHECKED_FILE = STATE / "last_checked.txt"
 LAST_DIGEST_FILE = STATE / "last_digest_date.txt"
 
 UPDATES_SUBJECT = "\U0001F4FA YouTube watcher"
+MAX_REFERENCES = 20      # cap the email References header (and thread.json) growth
+MAX_PROCESSED = 500      # cap the processed-email dedupe ledger
+PDF_RETENTION_DAYS = int(os.environ.get("PDF_RETENTION_DAYS", "30"))  # prune older summaries
 RSS_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={cid}"
 MODEL = "claude-sonnet-4-6"
 PACIFIC = ZoneInfo("America/Los_Angeles")
@@ -199,7 +202,17 @@ def footer():
 # YouTube: RSS, transcript, channel-id resolution
 # --------------------------------------------------------------------------- #
 def fetch_feed(channel_id):
-    return feedparser.parse(RSS_URL.format(cid=channel_id))
+    """Fetch a channel's RSS feed. Uses requests (with a timeout) rather than letting
+    feedparser open the socket itself — feedparser.parse(url) has no timeout and can
+    hang forever, which would stall the run and hold the shared concurrency lock.
+    On any network error, returns an empty parse so the caller degrades gracefully."""
+    try:
+        resp = requests.get(RSS_URL.format(cid=channel_id), headers=UA, timeout=30)
+        resp.raise_for_status()
+        return feedparser.parse(resp.content)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  feed fetch failed for {channel_id}: {exc}")
+        return feedparser.parse(b"")
 
 
 def feed_channel_name(feed):
@@ -422,7 +435,12 @@ def send_threaded(body, attachments=None, subject=None, dry=False):
     thread.setdefault("base_subject", base_subject)
     thread.setdefault("root_message_id", new_id)
     thread["last_message_id"] = new_id
-    thread["references"] = refs + [new_id]
+    # Keep the thread root + most recent IDs only. Dated subjects already split each day
+    # into its own conversation, so older IDs add nothing but unbounded header growth.
+    new_refs = refs + [new_id]
+    if len(new_refs) > MAX_REFERENCES:
+        new_refs = new_refs[:1] + new_refs[-(MAX_REFERENCES - 1):]
+    thread["references"] = new_refs
     save_json(THREAD_FILE, thread)
 
 
@@ -448,6 +466,31 @@ th, td { border: 1px solid #cbd5e1; padding: 5px 9px; text-align: left; vertical
 th { background-color: #eef4ff; color: #15233b; }
 a { color: #2563eb; }
 """
+
+
+def prune_old_pdfs(retention_days=PDF_RETENTION_DAYS):
+    """Delete committed PDFs whose published date is older than retention_days so the
+    repo (and every CI checkout) stays small. last_seen is untouched, so pruned videos
+    are never re-summarized — only their stored PDF is dropped. Filenames embed the
+    published date as `...-YYYY-MM-DD-...`; git doesn't preserve mtimes, so we read the
+    date from the name rather than the filesystem."""
+    if retention_days <= 0 or not SUMMARIES.exists():
+        return
+    cutoff = datetime.datetime.now(PACIFIC).date() - datetime.timedelta(days=retention_days)
+    removed = 0
+    for pdf in SUMMARIES.glob("*.pdf"):
+        match = re.search(r"(\d{4}-\d{2}-\d{2})", pdf.name)
+        if not match:
+            continue  # e.g. an "unknown"-dated file — keep it
+        try:
+            pub_date = datetime.date.fromisoformat(match.group(1))
+        except ValueError:
+            continue
+        if pub_date < cutoff:
+            pdf.unlink()
+            removed += 1
+    if removed:
+        print(f"pruned {removed} PDF(s) older than {retention_days} days")
 
 
 def write_summary_pdf(channel_name, video_id, title, markdown_text, published_date):
@@ -624,6 +667,7 @@ def run_digest(force=False, dry=False):
         save_json(LAST_SEEN_FILE, last_seen)
         LAST_DIGEST_FILE.write_text(today + "\n")  # mark today done so later fires skip
         LAST_CHECKED_FILE.write_text(now_pt.isoformat() + "\n")
+        prune_old_pdfs()  # keep the committed summaries/ folder bounded
 
 
 # --------------------------------------------------------------------------- #
@@ -716,7 +760,7 @@ def resolve_target(text, channels, pending):
     return None
 
 
-def cmd_add(url, channels):
+def cmd_add(url, channels, dry=False):
     cid = resolve_channel_id(url)
     if not cid:
         return f"Couldn't find a YouTube channel from that link:\n{url}\nTry the channel page URL or a video link."
@@ -733,12 +777,14 @@ def cmd_add(url, channels):
     channels.append(
         {"channel_id": cid, "name": name, "added_at": datetime.date.today().isoformat()}
     )
-    save_channels(channels)
+    if not dry:
+        save_channels(channels)
 
     last_seen = load_json(LAST_SEEN_FILE, {})
     if latest_id:
         last_seen[cid] = latest_id  # seed: only future uploads get summarized
-        save_json(LAST_SEEN_FILE, last_seen)
+        if not dry:
+            save_json(LAST_SEEN_FILE, last_seen)
 
     return (
         f"Added {name}. You'll get a summary for every new upload from now on.\n"
@@ -757,27 +803,29 @@ def cmd_list(channels):
     return "\n".join(lines)
 
 
-def cmd_delete_prompt(channels):
+def cmd_delete_prompt(channels, dry=False):
     if not channels:
         return "You're not watching any channels."
     mapping = {str(i): c["channel_id"] for i, c in enumerate(channels, 1)}
-    save_json(
-        PENDING_FILE,
-        {"action": "delete", "map": mapping, "created": datetime.datetime.now(PACIFIC).isoformat()},
-    )
+    if not dry:
+        save_json(
+            PENDING_FILE,
+            {"action": "delete", "map": mapping, "created": datetime.datetime.now(PACIFIC).isoformat()},
+        )
     lines = ["Which channel should I delete? Reply with the number or the name:"]
     lines += [f"{i}. {c['name']}" for i, c in enumerate(channels, 1)]
     return "\n".join(lines)
 
 
-def do_delete(cid, channels):
+def do_delete(cid, channels, dry=False):
     name = next((c["name"] for c in channels if c["channel_id"] == cid), cid)
     remaining = [c for c in channels if c["channel_id"] != cid]
-    save_channels(remaining)
-    last_seen = load_json(LAST_SEEN_FILE, {})
-    last_seen.pop(cid, None)
-    save_json(LAST_SEEN_FILE, last_seen)
-    clear_pending()
+    if not dry:
+        save_channels(remaining)
+        last_seen = load_json(LAST_SEEN_FILE, {})
+        last_seen.pop(cid, None)
+        save_json(LAST_SEEN_FILE, last_seen)
+        clear_pending()
     return f"\U0001F5D1 Removed {name} — now watching {len(remaining)} channels."
 
 
@@ -787,19 +835,29 @@ def handle_command(command_text, dry=False):
     channels = load_channels()
     pending = load_pending()
 
-    url_match = YT_URL_RE.search(text)
-    if url_match:
-        reply = cmd_add(url_match.group(0).strip(), channels)
-    elif re.search(r"\b(list|channels|show)\b", low):
-        reply = cmd_list(channels)
-    elif re.search(r"\b(delete|remove|stop)\b", low) or pending.get("action") == "delete":
+    wants_add = YT_URL_RE.search(text)
+    wants_delete = re.search(r"\b(delete|remove|stop)\b", low)
+    # 'show' is intentionally NOT a list synonym: it collides with channel names
+    # (e.g. "The Saamir Show"), which would misroute a delete-by-name to `list`.
+    wants_list = re.search(r"\b(list|channels)\b", low)
+    pending_delete = pending.get("action") == "delete"
+
+    if wants_add:
+        reply = cmd_add(wants_add.group(0).strip(), channels, dry=dry)
+    elif pending_delete and not wants_list:
+        # We previously asked which channel to delete; this reply is the target
+        # (a number or a name). Resolve it BEFORE the generic `list` fallback so a
+        # channel name isn't mistaken for a command. (`list` still lets you peek.)
         cid = resolve_target(text, channels, pending)
         if cid:
-            reply = do_delete(cid, channels)
-        elif re.search(r"\b(delete|remove|stop)\b", low):
-            reply = cmd_delete_prompt(channels)
+            reply = do_delete(cid, channels, dry=dry)
         else:
             reply = "Reply with the number or name to delete (or 'list' to see them)."
+    elif wants_delete:
+        cid = resolve_target(text, channels, pending)
+        reply = do_delete(cid, channels, dry=dry) if cid else cmd_delete_prompt(channels, dry=dry)
+    elif wants_list:
+        reply = cmd_list(channels)
     else:
         reply = "I didn't catch that. Reply with:\n  add <link>   |   list   |   delete"
 
@@ -810,7 +868,8 @@ def run_commands(dry=False):
     addr = env("GMAIL_ADDRESS")
     password = env("GMAIL_APP_PASSWORD")
     allow = {a.strip().lower() for a in env("ALLOWLIST_SENDERS").split(",") if a.strip()}
-    processed = set(load_json(PROCESSED_FILE, []))
+    processed_log = load_json(PROCESSED_FILE, [])   # ordered: oldest first, newest last
+    processed = set(processed_log)
 
     # Message-IDs in our one canonical thread — a reply referencing any of them is a
     # command, so the user can just reply in the thread (chat-style) with no `yt` subject.
@@ -859,16 +918,23 @@ def run_commands(dry=False):
             continue
 
         print(f"command from {sender}: {command_text.strip().splitlines()[0][:60]!r}")
-        handle_command(command_text, dry=dry)
+        try:
+            handle_command(command_text, dry=dry)
+        except Exception as exc:  # noqa: BLE001 - one bad command must not abort the batch
+            print(f"  command failed: {exc} — leaving unmarked to retry next run")
+            continue  # don't mark Seen/processed, so it retries next run
 
         if not dry:
             mailbox.store(num, "+FLAGS", "\\Seen")
-        if msgid:
+        if msgid and msgid not in processed:
             processed.add(msgid)
+            processed_log.append(msgid)
 
     mailbox.logout()
     if not dry:
-        save_json(PROCESSED_FILE, sorted(processed))
+        # Bound the dedupe ledger; intake only searches the last 3 days, so pruned
+        # (older) IDs can't reappear in a future search.
+        save_json(PROCESSED_FILE, processed_log[-MAX_PROCESSED:])
 
 
 # --------------------------------------------------------------------------- #

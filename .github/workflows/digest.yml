@@ -18,6 +18,7 @@ concurrency:
 jobs:
   digest:
     runs-on: ubuntu-latest
+    timeout-minutes: 30   # backstop: never hold the shared concurrency lock for the 6h default
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -53,8 +54,20 @@ jobs:
           git add -A
           if git diff --cached --quiet; then
             echo "No changes."
-          else
-            git commit -m "digest: update summaries & state"
-            git pull --rebase --autostash || true
-            git push
+            exit 0
           fi
+          git commit -m "digest: update summaries & state"
+          # Push with bounded retries. The shared concurrency group serializes the two
+          # workflows, so a non-fast-forward is rare (a human push) — rebase, retry, and
+          # fail loudly rather than swallowing a conflict and leaving state un-pushed
+          # (which would re-send already-sent videos on the next run).
+          for attempt in 1 2 3; do
+            if git pull --rebase --autostash && git push; then
+              echo "Pushed on attempt $attempt."
+              exit 0
+            fi
+            git rebase --abort 2>/dev/null || true
+            sleep $((attempt * 5))
+          done
+          echo "::error::Failed to push state after 3 attempts"
+          exit 1
