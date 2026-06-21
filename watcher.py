@@ -41,6 +41,7 @@ THREAD_FILE = STATE / "thread.json"
 PROCESSED_FILE = STATE / "processed_emails.json"
 PENDING_FILE = STATE / "pending.json"
 LAST_CHECKED_FILE = STATE / "last_checked.txt"
+LAST_DIGEST_FILE = STATE / "last_digest_date.txt"
 
 UPDATES_SUBJECT = "\U0001F4FA YouTube watcher"
 RSS_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={cid}"
@@ -561,10 +562,17 @@ def process_new_video(channel_name, entry, dry=False):
 
 
 def run_digest(force=False, dry=False):
+    now_pt = datetime.datetime.now(PACIFIC)
+    today = now_pt.date().isoformat()
     if not force:
-        now_pt = datetime.datetime.now(PACIFIC)
-        if now_pt.hour != 8:
-            print(f"Not 8am Pacific (currently {now_pt:%H:%M} PT) — exiting.")
+        # Run once per day on the first cron fire AT/AFTER 8am Pacific. GitHub delays
+        # scheduled runs (often 1-2h), so an exact "hour == 8" check would skip every
+        # delayed run; instead gate on >= 8am plus a "ran today" marker.
+        if now_pt.hour < 8:
+            print(f"Before 8am Pacific (currently {now_pt:%H:%M} PT) — exiting.")
+            return
+        if LAST_DIGEST_FILE.exists() and LAST_DIGEST_FILE.read_text().strip() == today:
+            print(f"Digest already ran today ({today}) — exiting.")
             return
 
     channels = load_channels()
@@ -614,7 +622,8 @@ def run_digest(force=False, dry=False):
         for cid, vid in advance.items():
             last_seen[cid] = vid
         save_json(LAST_SEEN_FILE, last_seen)
-        LAST_CHECKED_FILE.write_text(datetime.datetime.now(PACIFIC).isoformat() + "\n")
+        LAST_DIGEST_FILE.write_text(today + "\n")  # mark today done so later fires skip
+        LAST_CHECKED_FILE.write_text(now_pt.isoformat() + "\n")
 
 
 # --------------------------------------------------------------------------- #
