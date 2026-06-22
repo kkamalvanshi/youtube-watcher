@@ -597,6 +597,27 @@ def send_digest_email(items, dry=False):
     send_threaded(body, attachments=[it["pdf"] for it in items], subject=subject, dry=dry)
 
 
+def send_no_new_videos_email(channel_count, dry=False):
+    """Send a short 'nothing new today' note so the watcher checks in every day, even on
+    quiet days. Same dated subject as the digest, so it lands in today's conversation."""
+    date_str = datetime.datetime.now(PACIFIC).strftime("%B %-d, %Y")
+    if channel_count:
+        line = (
+            f"All quiet today — none of the {channel_count} channel"
+            f"{'s' if channel_count != 1 else ''} you're watching have uploaded "
+            "since the last check."
+        )
+    else:
+        line = "You're not watching any channels yet — nothing to check."
+    body = (
+        f"\U0001F4ED No new videos — {date_str}\n\n"
+        f"{line}\n\n"
+        "I'll keep watching and send a full summary the moment something drops.\n"
+    )
+    subject = f"{UPDATES_SUBJECT} — {date_str}"
+    send_threaded(body, subject=subject, dry=dry)
+
+
 def process_new_video(channel_name, entry, dry=False):
     """Summarize + email a single video (a one-item dated digest)."""
     item = summarize_video(channel_name, entry)
@@ -622,6 +643,7 @@ def run_digest(force=False, dry=False):
     last_seen = load_json(LAST_SEEN_FILE, {})
     items = []        # all new videos across channels, summarized
     advance = {}      # channel_id -> newest video id to mark seen (only fully summarized)
+    feeds_read = 0    # channels whose RSS we actually managed to read this run
 
     for channel in channels:
         cid = channel["channel_id"]
@@ -632,6 +654,7 @@ def run_digest(force=False, dry=False):
         if not entries:
             print("  no entries in feed")
             continue
+        feeds_read += 1
 
         seen = last_seen.get(cid)
         if seen is None:
@@ -655,13 +678,22 @@ def run_digest(force=False, dry=False):
                 break
         time.sleep(1)  # be gentle to YouTube from a single runner IP
 
+    # Did we actually assess the world? True if we read >=1 feed, or there's nothing to
+    # watch. False means every fetch failed (network/YouTube down) — don't claim "all
+    # quiet" and don't mark today done, so a later fire retries instead of skipping a day.
+    checked = feeds_read > 0 or not channels
+
     if items:
         send_digest_email(items, dry=dry)  # ONE email for the whole day's batch
         print(f"sent {len(items)} video(s) in one digest email")
+    elif checked:
+        print("No new videos — sending the daily 'all quiet' note.")
+        send_no_new_videos_email(len(channels), dry=dry)
     else:
-        print("No new videos.")
+        print(f"Could not read any of {len(channels)} feeds — not sending a note; "
+              "leaving today unmarked so the next fire retries.")
 
-    if not dry:
+    if not dry and checked:
         for cid, vid in advance.items():
             last_seen[cid] = vid
         save_json(LAST_SEEN_FILE, last_seen)
