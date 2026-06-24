@@ -2,11 +2,21 @@ name: Daily digest
 
 on:
   schedule:
-    # GitHub cron is UTC with no DST handling. Fire at both 15:00 and 16:00 UTC;
-    # watcher.py proceeds only when it's actually 08:00 America/Los_Angeles.
+    # FALLBACK ONLY. The primary trigger is an external scheduler (cron-job.org)
+    # that calls this workflow via the workflow_dispatch REST API at 08:00
+    # America/Los_Angeles — dispatch events run on time, whereas GitHub `schedule`
+    # events are throttled/delayed 1-3h. These cron lines stay as a safety net if
+    # the external trigger ever fails. GitHub cron is UTC with no DST handling, so
+    # fire at both 15:00 and 16:00 UTC; the once-per-day guard dedupes against the
+    # external trigger so only ONE digest email is ever sent per day.
     - cron: "0 15 * * *"
     - cron: "0 16 * * *"
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Force send now, bypassing the 8am / once-per-day guard (manual testing)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -42,7 +52,10 @@ jobs:
           WEBSHARE_PROXY_USERNAME: ${{ secrets.WEBSHARE_PROXY_USERNAME }}
           WEBSHARE_PROXY_PASSWORD: ${{ secrets.WEBSHARE_PROXY_PASSWORD }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          # Only an explicit manual force bypasses the guard. The external
+          # cron-job.org trigger and the GitHub schedule fallback both run the
+          # guarded path, so the once-per-day marker guarantees a single send.
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
             python watcher.py --mode digest --force
           else
             python watcher.py --mode digest

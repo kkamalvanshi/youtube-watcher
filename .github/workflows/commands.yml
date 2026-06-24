@@ -2,6 +2,11 @@ name: Command listener
 
 on:
   schedule:
+    # FALLBACK ONLY. Primary trigger is an external scheduler (cron-job.org) that
+    # calls this workflow via the workflow_dispatch REST API every ~5 min — dispatch
+    # runs on time, whereas GitHub `schedule` is throttled (this */15 actually fires
+    # every 1-4h in practice). Command processing dedupes on email message-id, so
+    # extra/overlapping triggers never send duplicate replies.
     - cron: "*/15 * * * *"
   workflow_dispatch:
 
