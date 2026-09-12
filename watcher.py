@@ -625,7 +625,7 @@ def process_new_video(channel_name, entry, dry=False):
     print(f"  wrote {item['pdf']} and emailed it")
 
 
-def run_digest(force=False, dry=False):
+def run_digest(force=False, dry=False, only=None):
     now_pt = datetime.datetime.now(PACIFIC)
     today = now_pt.date().isoformat()
     if not force:
@@ -640,6 +640,11 @@ def run_digest(force=False, dry=False):
             return
 
     channels = load_channels()
+    if only:
+        channels = [c for c in channels if c["channel_id"] == only or c["name"] == only]
+        if not channels:
+            print(f"--only {only!r} matched no watched channel — exiting.")
+            return
     last_seen = load_json(LAST_SEEN_FILE, {})
     items = []        # all new videos across channels, summarized
     advance = {}      # channel_id -> newest video id to mark seen (only fully summarized)
@@ -977,10 +982,11 @@ def main():
     parser.add_argument("--mode", choices=["digest", "commands"], required=True)
     parser.add_argument("--force", action="store_true", help="ignore the 8am Pacific guard (digest)")
     parser.add_argument("--no-email", action="store_true", help="print emails instead of sending")
+    parser.add_argument("--only", help="digest: limit the run to one watched channel (id or name)")
     args = parser.parse_args()
 
     if args.mode == "digest":
-        run_digest(force=args.force, dry=args.no_email)
+        run_digest(force=args.force, dry=args.no_email, only=args.only)
     else:
         run_commands(dry=args.no_email)
 

@@ -17,6 +17,10 @@ on:
         description: "Force send now, bypassing the 8am / once-per-day guard (manual testing)"
         type: boolean
         default: false
+      only:
+        description: "Limit this run to one watched channel (id or name); leave blank for all"
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -51,15 +55,22 @@ jobs:
           SUPADATA_API_KEY: ${{ secrets.SUPADATA_API_KEY }}
           WEBSHARE_PROXY_USERNAME: ${{ secrets.WEBSHARE_PROXY_USERNAME }}
           WEBSHARE_PROXY_PASSWORD: ${{ secrets.WEBSHARE_PROXY_PASSWORD }}
+          FORCE_INPUT: ${{ github.event.inputs.force }}
+          ONLY_INPUT: ${{ github.event.inputs.only }}
         run: |
           # Only an explicit manual force bypasses the guard. The external
           # cron-job.org trigger and the GitHub schedule fallback both run the
           # guarded path, so the once-per-day marker guarantees a single send.
-          if [ "${{ github.event.inputs.force }}" = "true" ]; then
-            python watcher.py --mode digest --force
-          else
-            python watcher.py --mode digest
+          # Inputs are passed via env vars (not interpolated into the script)
+          # to avoid shell injection from the workflow_dispatch text field.
+          args=(--mode digest)
+          if [ "$FORCE_INPUT" = "true" ]; then
+            args+=(--force)
           fi
+          if [ -n "$ONLY_INPUT" ]; then
+            args+=(--only "$ONLY_INPUT")
+          fi
+          python watcher.py "${args[@]}"
       - name: Commit summaries & state
         run: |
           git config user.name "github-actions[bot]"
