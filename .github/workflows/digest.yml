@@ -13,12 +13,17 @@ on:
     - cron: "0 16 * * *"
   workflow_dispatch:
     inputs:
+      mode:
+        description: "digest: normal run. feed: print one channel's raw RSS feed (diagnostic, no email/state changes)"
+        type: choice
+        options: ["digest", "feed"]
+        default: "digest"
       force:
         description: "Force send now, bypassing the 8am / once-per-day guard (manual testing)"
         type: boolean
         default: false
       only:
-        description: "Limit this run to one watched channel (id or name); leave blank for all"
+        description: "Limit this run to one watched channel (id or name); required for mode=feed"
         type: string
         default: ""
 
@@ -40,10 +45,17 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements.txt
       - name: Install Chromium for PDF rendering
+        if: github.event.inputs.mode != 'feed'
         run: |
           python -m playwright install --with-deps chromium
           sudo apt-get install -y fonts-noto-color-emoji
+      - name: Print raw feed (diagnostic)
+        if: github.event.inputs.mode == 'feed'
+        env:
+          ONLY_INPUT: ${{ github.event.inputs.only }}
+        run: python watcher.py --mode feed --only "$ONLY_INPUT"
       - name: Run digest
+        if: github.event.inputs.mode != 'feed'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
@@ -72,6 +84,7 @@ jobs:
           fi
           python watcher.py "${args[@]}"
       - name: Commit summaries & state
+        if: github.event.inputs.mode != 'feed'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

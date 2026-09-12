@@ -231,6 +231,22 @@ def entry_description(entry):
     return entry.get("summary") or entry.get("media_description") or ""
 
 
+def debug_feed(only):
+    """Print a watched channel's raw RSS feed (id, title, published) newest-first.
+    Diagnostic only: no email, no state changes."""
+    channels = load_channels()
+    matches = [c for c in channels if c["channel_id"] == only or c["name"] == only]
+    if not matches:
+        print(f"{only!r} matched no watched channel.")
+        return
+    channel = matches[0]
+    feed = fetch_feed(channel["channel_id"])
+    print(f"Feed title: {feed_channel_name(feed)}")
+    print(f"{len(feed.entries)} entries (feed order, normally newest-first):")
+    for entry in feed.entries:
+        print(f"  {entry_video_id(entry)}  {entry.get('published', '?')}  {entry.get('title', '(no title)')}")
+
+
 def _build_transcript_api():
     """Build a YouTubeTranscriptApi, routed through Webshare residential proxies
     when WEBSHARE_PROXY_USERNAME / WEBSHARE_PROXY_PASSWORD are set."""
@@ -979,7 +995,7 @@ def run_commands(dry=False):
 # --------------------------------------------------------------------------- #
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=["digest", "commands"], required=True)
+    parser.add_argument("--mode", choices=["digest", "commands", "feed"], required=True)
     parser.add_argument("--force", action="store_true", help="ignore the 8am Pacific guard (digest)")
     parser.add_argument("--no-email", action="store_true", help="print emails instead of sending")
     parser.add_argument("--only", help="digest: limit the run to one watched channel (id or name)")
@@ -987,6 +1003,10 @@ def main():
 
     if args.mode == "digest":
         run_digest(force=args.force, dry=args.no_email, only=args.only)
+    elif args.mode == "feed":
+        if not args.only:
+            parser.error("--mode feed requires --only <channel id or name>")
+        debug_feed(args.only)
     else:
         run_commands(dry=args.no_email)
 
