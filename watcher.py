@@ -641,6 +641,36 @@ def process_new_video(channel_name, entry, dry=False):
     print(f"  wrote {item['pdf']} and emailed it")
 
 
+def extract_video_id(ref):
+    match = re.search(r"(?:v=|youtu\.be/|shorts/)([\w-]{11})", ref)
+    if match:
+        return match.group(1)
+    return ref if re.fullmatch(r"[\w-]{11}", ref) else None
+
+
+def run_single_video(only, video_ref, dry=False):
+    """Summarize + email one specific video from a watched channel's feed. A one-off
+    resend/backfill: does NOT touch last_seen, so it never affects normal digest
+    tracking of what's already been sent for that channel."""
+    channels = load_channels()
+    matches = [c for c in channels if c["channel_id"] == only or c["name"] == only]
+    if not matches:
+        print(f"--only {only!r} matched no watched channel — exiting.")
+        return
+    channel = matches[0]
+    video_id = extract_video_id(video_ref)
+    if not video_id:
+        print(f"Could not parse a video id from {video_ref!r}")
+        return
+    feed = fetch_feed(channel["channel_id"])
+    entry = next((e for e in feed.entries if entry_video_id(e) == video_id), None)
+    if not entry:
+        print(f"Video {video_id} not found in {channel['name']}'s current feed "
+              "(only the last ~15 uploads are listed).")
+        return
+    process_new_video(channel["name"], entry, dry=dry)
+
+
 def run_digest(force=False, dry=False, only=None):
     now_pt = datetime.datetime.now(PACIFIC)
     today = now_pt.date().isoformat()
@@ -999,10 +1029,17 @@ def main():
     parser.add_argument("--force", action="store_true", help="ignore the 8am Pacific guard (digest)")
     parser.add_argument("--no-email", action="store_true", help="print emails instead of sending")
     parser.add_argument("--only", help="digest: limit the run to one watched channel (id or name)")
+    parser.add_argument("--video", help="digest: summarize + email one specific video (id or URL) "
+                                         "from the --only channel; does not advance last_seen")
     args = parser.parse_args()
 
     if args.mode == "digest":
-        run_digest(force=args.force, dry=args.no_email, only=args.only)
+        if args.video:
+            if not args.only:
+                parser.error("--video requires --only <channel id or name>")
+            run_single_video(args.only, args.video, dry=args.no_email)
+        else:
+            run_digest(force=args.force, dry=args.no_email, only=args.only)
     elif args.mode == "feed":
         if not args.only:
             parser.error("--mode feed requires --only <channel id or name>")
