@@ -378,7 +378,9 @@ def resolve_channel_id(url):
 # X (Twitter): API integration, thread grouping, channel-handle resolution
 # --------------------------------------------------------------------------- #
 def x_api_get(path, params):
-    """GET one X API v2 endpoint with the app-only bearer token. Raises on HTTP error."""
+    """GET one X API v2 endpoint with the app-only bearer token. Raises on HTTP error,
+    including the response body — X's error bodies name the actual cause (invalid
+    token, wrong access tier, suspended app, etc.), which the plain status code doesn't."""
     token = env("X_BEARER_TOKEN")
     resp = requests.get(
         f"{X_API_BASE}{path}",
@@ -386,7 +388,8 @@ def x_api_get(path, params):
         params=params,
         timeout=30,
     )
-    resp.raise_for_status()
+    if not resp.ok:
+        raise RuntimeError(f"{resp.status_code} {resp.reason} for {resp.url}: {resp.text[:500]}")
     return resp.json()
 
 
