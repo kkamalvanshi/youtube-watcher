@@ -47,7 +47,7 @@ Tick each only after you've confirmed it in code AND, where possible, by running
   - [ ] `add` + a YouTube link → resolves `@handle` / `/c/` / `/user/` / `/channel/` / video URL to a `UC…` id, adds it, seeds last-seen to current latest (only future uploads summarized), replies to confirm.
   - [ ] `list` → numbered list of channels.
   - [ ] `delete` → numbered list, then reply with a **number or name**; also one-shot `delete <number|name>`.
-- [ ] Delivery is **email to `kkamalvanshi@gmail.com`** via **Resend** (a distinct sender, so it lands in the inbox — not self-sent "from me").
+- [ ] Delivery is **email to the configured `RECIPIENT`** via **Resend** (a distinct sender, so it lands in the inbox — not self-sent "from me").
 - [ ] User's command **replies route back** to the Gmail inbox the listener reads (Reply-To).
 - [ ] Summary delivered as a **PDF attachment** (not pasted into the body); email body = title + link + TL;DR only.
 - [ ] Every email ends with a **command cheatsheet** footer.
