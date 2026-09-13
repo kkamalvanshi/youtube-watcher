@@ -519,6 +519,7 @@ def debug_x_feed(only):
         if not user_id:
             print(f"Could not resolve {only!r} to an X account.")
             return
+        print(f"Resolved to user_id={user_id}, handle=@{handle}")
     tweets = fetch_x_user_tweets(user_id)
     print(f"@{handle}: {len(tweets)} tweets fetched (no since_id — full recent window):")
     for tweet in tweets:
