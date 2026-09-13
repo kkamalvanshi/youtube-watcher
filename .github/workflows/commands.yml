@@ -36,6 +36,7 @@ jobs:
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           ALLOWLIST_SENDERS: ${{ secrets.ALLOWLIST_SENDERS }}
+          X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
         run: python watcher.py --mode commands
       - name: Commit channels & state
         run: |

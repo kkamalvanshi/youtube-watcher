@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""YouTube channel watcher + Gmail control plane.
+"""YouTube channel + X (Twitter) poster watcher, with a Gmail control plane.
 
 Modes:
-  --mode digest    Check watched channels, summarize new uploads, email them
-                   (one threaded conversation). Guarded to 8am Pacific unless --force.
-  --mode commands  Read Gmail for `yt` commands (add via link / list / delete) and act.
+  --mode digest    Check watched channels + X accounts, summarize new uploads/posts,
+                   email them as one threaded conversation with a "YouTube" section
+                   and an "X Posts" section. Guarded to 8am Pacific unless --force.
+  --mode commands  Read Gmail for `yt`/`x` commands (add / list / delete) and act.
+  --mode feed      Diagnostic: print one channel's raw RSS feed. No email/state changes.
+  --mode x-feed    Diagnostic: print one X account's raw fetched tweets. No side effects.
 
 Secrets are read from env vars:
-  ANTHROPIC_API_KEY, GMAIL_ADDRESS, GMAIL_APP_PASSWORD, ALLOWLIST_SENDERS
+  ANTHROPIC_API_KEY, GMAIL_ADDRESS, GMAIL_APP_PASSWORD, ALLOWLIST_SENDERS, X_BEARER_TOKEN
 """
 
 import argparse
@@ -37,6 +40,8 @@ STATE = ROOT / "state"
 SUMMARIES = ROOT / "summaries"
 CHANNELS_FILE = ROOT / "channels.json"
 LAST_SEEN_FILE = STATE / "last_seen.json"
+X_USERS_FILE = ROOT / "x_users.json"
+X_LAST_SEEN_FILE = STATE / "x_last_seen.json"
 THREAD_FILE = STATE / "thread.json"
 PROCESSED_FILE = STATE / "processed_emails.json"
 PENDING_FILE = STATE / "pending.json"
@@ -48,6 +53,9 @@ MAX_REFERENCES = 20      # cap the email References header (and thread.json) gro
 MAX_PROCESSED = 500      # cap the processed-email dedupe ledger
 PDF_RETENTION_DAYS = int(os.environ.get("PDF_RETENTION_DAYS", "30"))  # prune older summaries
 RSS_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={cid}"
+X_API_BASE = "https://api.x.com/2"
+X_TWEET_FIELDS = "created_at,conversation_id,in_reply_to_user_id,referenced_tweets,text,entities,author_id"
+X_MEDIA_FIELDS = "url,preview_image_url,type,width,height"
 MODEL = "claude-sonnet-4-6"
 PACIFIC = ZoneInfo("America/Los_Angeles")
 UA = {
@@ -183,6 +191,14 @@ def save_channels(channels):
     save_json(CHANNELS_FILE, channels)
 
 
+def load_x_users():
+    return load_json(X_USERS_FILE, [])
+
+
+def save_x_users(x_users):
+    save_json(X_USERS_FILE, x_users)
+
+
 def slugify(text):
     text = re.sub(r"[^\w\s-]", "", text or "").strip().lower()
     return re.sub(r"[\s_-]+", "-", text)[:60] or "video"
@@ -195,6 +211,9 @@ def footer():
         "  • Add a channel:    add <YouTube channel or video link>\n"
         "  • List channels:    list\n"
         "  • Delete a channel: delete   (then reply with the number or name)\n"
+        "  • Add an X account:    x add <x.com/twitter.com link or @handle>\n"
+        "  • List X accounts:     x list\n"
+        "  • Delete an X account: x delete   (then reply with the number or name)\n"
     )
 
 
@@ -356,6 +375,150 @@ def resolve_channel_id(url):
 
 
 # --------------------------------------------------------------------------- #
+# X (Twitter): API integration, thread grouping, channel-handle resolution
+# --------------------------------------------------------------------------- #
+def x_api_get(path, params):
+    """GET one X API v2 endpoint with the app-only bearer token. Raises on HTTP error."""
+    token = env("X_BEARER_TOKEN")
+    resp = requests.get(
+        f"{X_API_BASE}{path}",
+        headers={"Authorization": f"Bearer {token}"},
+        params=params,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def resolve_x_handle(url_or_handle):
+    """Resolve an x.com/twitter.com URL or a bare @handle to (user_id, handle). Returns
+    (None, None) if nothing could be resolved."""
+    match = re.search(r"(?:x\.com|twitter\.com)/(\w{1,15})", url_or_handle, re.I)
+    handle = match.group(1) if match else url_or_handle.strip().lstrip("@")
+    handle = handle.strip()
+    if not handle or handle.lower() in ("i", "home", "search"):  # common non-profile paths
+        return None, None
+    try:
+        data = x_api_get(f"/users/by/username/{handle}", {})
+    except Exception as exc:  # noqa: BLE001
+        print(f"  could not resolve X handle {handle!r}: {exc}")
+        return None, None
+    user = data.get("data")
+    if not user:
+        return None, None
+    return user["id"], user["username"]
+
+
+def fetch_x_user_tweets(user_id, since_id=None, max_results=100):
+    """Fetch a user's own recent tweets (media/entities included), newest activity within
+    the window. Returns a list of tweet dicts merged with any attached media."""
+    params = {
+        "max_results": max_results,
+        "exclude": "retweets",
+        "tweet.fields": X_TWEET_FIELDS,
+        "expansions": "attachments.media_keys",
+        "media.fields": X_MEDIA_FIELDS,
+    }
+    if since_id:
+        params["since_id"] = since_id
+    try:
+        data = x_api_get(f"/users/{user_id}/tweets", params)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  X tweets fetch failed for {user_id}: {exc}")
+        return []
+    return _attach_media(data)
+
+
+def _attach_media(data):
+    """Merge expansions.media into each tweet as tweet['media'] (a list of media dicts)."""
+    media_by_key = {m["media_key"]: m for m in data.get("includes", {}).get("media", [])}
+    tweets = data.get("data") or []
+    for tweet in tweets:
+        keys = tweet.get("attachments", {}).get("media_keys", [])
+        tweet["media"] = [media_by_key[k] for k in keys if k in media_by_key]
+    return tweets
+
+
+def filter_self_thread_tweets(tweets, user_id):
+    """Keep a tweet if it's not a reply, or is a reply to the same account (a self-thread
+    continuation). Drop replies to anyone else."""
+    return [t for t in tweets if not t.get("in_reply_to_user_id") or t["in_reply_to_user_id"] == user_id]
+
+
+def group_by_conversation(tweets):
+    """Group tweets by conversation_id, each group sorted oldest->newest by tweet id."""
+    groups = {}
+    for tweet in tweets:
+        groups.setdefault(tweet["conversation_id"], []).append(tweet)
+    for group in groups.values():
+        group.sort(key=lambda t: int(t["id"]))
+    return groups
+
+
+def backfill_thread(conversation_id, user_id, handle):
+    """Fetch the full conversation (this author's tweets only) via recent search, for a
+    thread that continues past this run's since_id window. Covers only the last 7 days
+    (X's standard recent-search window); returns [] if nothing more is found."""
+    params = {
+        "query": f"conversation_id:{conversation_id} from:{handle}",
+        "max_results": 100,
+        "tweet.fields": X_TWEET_FIELDS,
+        "expansions": "attachments.media_keys",
+        "media.fields": X_MEDIA_FIELDS,
+    }
+    try:
+        data = x_api_get("/tweets/search/recent", params)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  backfill search failed for conversation {conversation_id}: {exc}")
+        return []
+    return _attach_media(data)
+
+
+def complete_thread_groups(groups, user_id, handle):
+    """For each conversation group whose oldest tweet is itself a reply (meaning earlier
+    tweets fell outside this run's fetch window), backfill via recent search and merge.
+    Falls back to the group as-fetched if backfill finds nothing more (e.g. the true root
+    is older than the 7-day search window)."""
+    completed = {}
+    for conversation_id, group in groups.items():
+        if group[0].get("in_reply_to_user_id"):
+            backfilled = backfill_thread(conversation_id, user_id, handle)
+            if backfilled:
+                by_id = {t["id"]: t for t in group}
+                for tweet in backfilled:
+                    by_id[tweet["id"]] = tweet
+                group = sorted(by_id.values(), key=lambda t: int(t["id"]))
+        completed[conversation_id] = group
+    return completed
+
+
+def expand_tweet_text(tweet):
+    """Tweet text with t.co links swapped for their expanded_url."""
+    text = tweet.get("text", "")
+    for url in tweet.get("entities", {}).get("urls", []):
+        short, expanded = url.get("url"), url.get("expanded_url")
+        if short and expanded:
+            text = text.replace(short, expanded)
+    return text
+
+
+def debug_x_feed(only):
+    """Print one watched X account's raw fetched tweets (diagnostic, no state changes)."""
+    x_users = load_x_users()
+    matches = [u for u in x_users if u["user_id"] == only or u["handle"] == only]
+    if not matches:
+        print(f"{only!r} matched no watched X account.")
+        return
+    user = matches[0]
+    tweets = fetch_x_user_tweets(user["user_id"])
+    print(f"@{user['handle']}: {len(tweets)} tweets fetched (no since_id — full recent window):")
+    for tweet in tweets:
+        print(f"  {tweet['id']}  {tweet.get('created_at', '?')}  "
+              f"in_reply_to={tweet.get('in_reply_to_user_id')}  "
+              f"conversation_id={tweet.get('conversation_id')}  {tweet.get('text', '')[:60]!r}")
+
+
+# --------------------------------------------------------------------------- #
 # Claude summarization
 # --------------------------------------------------------------------------- #
 def summarize(title, channel, url, published, source, content):
@@ -384,6 +547,43 @@ def summarize(title, channel, url, published, source, content):
     if not text:
         raise RuntimeError(f"empty summary response (stop_reason={resp.stop_reason})")
     return json.loads(text)
+
+
+X_POST_SUMMARY_SCHEMA = {
+    "type": "object",
+    "properties": {"tldr": {"type": "string"}},
+    "required": ["tldr"],
+    "additionalProperties": False,
+}
+
+X_POST_SYSTEM_PROMPT = """You summarize a day's new X (Twitter) posts from one account into
+a single 1-2 sentence TL;DR. Base it STRICTLY on the text provided — never invent details.
+Cover the overall theme(s) across everything posted, not just the first post. Return JSON
+with one field, tldr (plain text, no markdown, roughly 20-40 words)."""
+
+
+def summarize_x_posts(handle, raw_text_blocks):
+    """One short, text-only Claude call: raw tweet text for everything an account posted
+    since last check -> a 1-2 sentence TL;DR, reused as both the email line and the PDF's
+    exec-summary callout. Deliberately NOT the video SUMMARY_SCHEMA/SYSTEM_PROMPT, which
+    are shaped for a markdown exec-summary+outline report."""
+    client = anthropic.Anthropic(max_retries=4)
+    user = f"@{handle}'s new posts today:\n\n" + "\n\n---\n\n".join(raw_text_blocks)
+    with client.messages.stream(
+        model=MODEL,
+        max_tokens=1024,
+        thinking={"type": "disabled"},
+        system=X_POST_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user}],
+        output_config={"format": {"type": "json_schema", "schema": X_POST_SUMMARY_SCHEMA}},
+    ) as stream:
+        resp = stream.get_final_message()
+    if resp.stop_reason == "refusal":
+        raise RuntimeError("Claude declined to summarize these posts.")
+    text = next((block.text for block in resp.content if block.type == "text"), None)
+    if not text:
+        raise RuntimeError(f"empty summary response (stop_reason={resp.stop_reason})")
+    return json.loads(text)["tldr"]
 
 
 # --------------------------------------------------------------------------- #
@@ -561,6 +761,92 @@ def write_summary_pdf(channel_name, video_id, title, markdown_text, published_da
     return path
 
 
+_TWEET_PDF_CSS = """
+body { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.5; color: #2b2b33; }
+.thread-hdr { background-color: #111827; padding: 16px 18px; margin-bottom: 16px; }
+.thread-hdr .name { color: #ffffff; font-size: 20px; font-weight: bold; }
+.thread-hdr .handle { color: #9ca3af; font-size: 14px; }
+.thread-hdr .meta { color: #9ca3af; font-size: 12px; margin-top: 7px; }
+.thread-hdr a { color: #93c5fd; }
+.exec { background-color: #eef4ff; border-left: 5px solid #2563eb; padding: 11px 14px; margin: 4px 0 16px 0; font-size: 15.5px; color: #15233b; }
+.exec strong { display: block; margin-bottom: 4px; }
+.tweet-card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px 15px; margin: 0 0 12px 0; }
+.tweet-meta { color: #94a3b8; font-size: 12px; margin-bottom: 6px; }
+.tweet-text { white-space: pre-wrap; font-size: 15px; }
+.tweet-text a { color: #2563eb; }
+.tweet-img { max-width: 100%; margin-top: 10px; border-radius: 6px; }
+.thread-ftr { color: #94a3b8; font-size: 12px; margin-top: 8px; }
+"""
+
+
+def write_tweet_pdf(handle, conversation_id, tweets, published_date, exec_summary):
+    """Render one X thread/post into a PDF: a header, an exec-summary callout (the same
+    text as the account's email TL;DR), then each tweet as its own verbatim card
+    (oldest-first) with images embedded as base64 data URIs.
+    """
+    import base64
+    from html import escape
+    from playwright.sync_api import sync_playwright
+
+    SUMMARIES.mkdir(parents=True, exist_ok=True)
+    first_text = expand_tweet_text(tweets[0]) if tweets else ""
+    path = SUMMARIES / (
+        f"{slugify('x-' + handle)}-{published_date}-{conversation_id}-{slugify(first_text[:40])}.pdf"
+    )
+
+    thread_url = f"https://x.com/{handle}/status/{tweets[0]['id']}" if tweets else f"https://x.com/{handle}"
+    label = "Thread" if len(tweets) > 1 else "Post"
+    header = (
+        f'<div class="thread-hdr"><div class="name">@{escape(handle)}</div>'
+        f'<div class="meta">{label} · {escape(published_date)} · '
+        f'<a href="{escape(thread_url)}">View on X</a></div></div>'
+    )
+    exec_html = f'<div class="exec"><strong>\U0001F4CB Executive Summary</strong>{escape(exec_summary)}</div>'
+
+    cards = []
+    for tweet in tweets:
+        created = tweet.get("created_at", "")
+        try:
+            when = datetime.datetime.fromisoformat(created.replace("Z", "+00:00")).strftime("%b %d, %Y · %-I:%M %p")
+        except ValueError:
+            when = created
+        text_html = escape(expand_tweet_text(tweet)).replace("\n", "<br>")
+        images_html = ""
+        for media in tweet.get("media", []):
+            media_url = media.get("url") or media.get("preview_image_url")
+            if not media_url:
+                continue
+            try:
+                img_bytes = requests.get(media_url, headers=UA, timeout=20).content
+                b64 = base64.b64encode(img_bytes).decode()
+                content_type = "image/png" if media_url.lower().endswith("png") else "image/jpeg"
+                images_html += f'<img class="tweet-img" src="data:{content_type};base64,{b64}" alt="attached image">'
+            except Exception as exc:  # noqa: BLE001
+                print(f"  could not embed image for tweet {tweet['id']}: {exc}")
+        cards.append(
+            f'<div class="tweet-card"><div class="tweet-meta">{escape(when)}</div>'
+            f'<div class="tweet-text">{text_html}</div>{images_html}</div>'
+        )
+
+    footer_html = f'<div class="thread-ftr">{len(tweets)} post{"s" if len(tweets) != 1 else ""} · fetched {datetime.date.today().isoformat()}</div>'
+    html = (
+        "<!doctype html><html><head><meta charset='utf-8'><style>" + _TWEET_PDF_CSS + "</style></head>"
+        "<body><div class='thread-doc'>" + header + exec_html + "".join(cards) + footer_html + "</div></body></html>"
+    )
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        page = browser.new_page()
+        page.set_content(html, wait_until="load")
+        page.pdf(
+            path=str(path),
+            format="Letter",
+            print_background=True,
+            margin={"top": "0.6in", "bottom": "0.6in", "left": "0.6in", "right": "0.6in"},
+        )
+        browser.close()
+    return path
+
+
 # --------------------------------------------------------------------------- #
 # Digest mode
 # --------------------------------------------------------------------------- #
@@ -594,39 +880,69 @@ def summarize_video(channel_name, entry):
     }
 
 
-def send_digest_email(items, dry=False):
-    """Send ONE email covering all `items` for the day — date in the subject, every PDF
-    attached. Each item is {channel, title, url, published, tldr, pdf}."""
+def send_digest_email(video_items, x_account_items, dry=False):
+    """Send ONE email covering all new videos and X posts for the day, as two headed
+    sections — each present only if it has content. video_items: {channel, title, url,
+    published, tldr, pdf}. x_account_items: {handle, tldr, threads: [{title, url, pdf}]}."""
     date_str = datetime.datetime.now(PACIFIC).strftime("%B %-d, %Y")
-    n = len(items)
-    head = f"{n} new video{'s' if n != 1 else ''} — {date_str}\n\n"
-    blocks = []
-    for it in items:
-        blocks.append(
-            f'\U0001F3AC {it["channel"]} — "{it["title"]}"\n'
-            f'▶  {it["url"]}\n'
-            f'TL;DR  {it["tldr"]}\n'
-            f'\U0001F4C4 Full summary attached: {it["pdf"].name}'
-        )
-    body = head + "\n\n──────────\n\n".join(blocks) + "\n"
+    video_count = len(video_items)
+    post_count = sum(len(acct["threads"]) for acct in x_account_items)
+    parts = []
+    if video_count:
+        parts.append(f"{video_count} video{'s' if video_count != 1 else ''}")
+    if post_count:
+        parts.append(f"{post_count} X post{'s' if post_count != 1 else ''}")
+    head = f"{' and '.join(parts)} — {date_str}\n\n"
+
+    sections = []
+    attachments = []
+
+    if video_items:
+        blocks = []
+        for it in video_items:
+            blocks.append(
+                f'\U0001F3AC {it["channel"]} — "{it["title"]}"\n'
+                f'▶  {it["url"]}\n'
+                f'TL;DR  {it["tldr"]}\n'
+                f'\U0001F4C4 Full summary attached: {it["pdf"].name}'
+            )
+            attachments.append(it["pdf"])
+        sections.append("\U0001F4FA YouTube\n──────────\n" + "\n\n".join(blocks))
+
+    if x_account_items:
+        blocks = []
+        for acct in x_account_items:
+            lines = [f'@{acct["handle"]}', f'TL;DR  {acct["tldr"]}']
+            for thread in acct["threads"]:
+                lines.append(f'  • {thread["title"]} — {thread["url"]}')
+                lines.append(f'    \U0001F4C4 {thread["pdf"].name}')
+                attachments.append(thread["pdf"])
+            blocks.append("\n".join(lines))
+        sections.append("\U0001F426 X Posts\n──────────\n" + "\n\n".join(blocks))
+
+    body = head + "\n\n".join(sections) + "\n"
     subject = f"{UPDATES_SUBJECT} — {date_str}"
-    send_threaded(body, attachments=[it["pdf"] for it in items], subject=subject, dry=dry)
+    send_threaded(body, attachments=attachments, subject=subject, dry=dry)
 
 
-def send_no_new_videos_email(channel_count, dry=False):
+def send_no_new_content_email(channel_count, x_user_count, dry=False):
     """Send a short 'nothing new today' note so the watcher checks in every day, even on
     quiet days. Same dated subject as the digest, so it lands in today's conversation."""
     date_str = datetime.datetime.now(PACIFIC).strftime("%B %-d, %Y")
-    if channel_count:
+    if channel_count or x_user_count:
+        parts = []
+        if channel_count:
+            parts.append(f"{channel_count} channel{'s' if channel_count != 1 else ''}")
+        if x_user_count:
+            parts.append(f"{x_user_count} X account{'s' if x_user_count != 1 else ''}")
         line = (
-            f"All quiet today — none of the {channel_count} channel"
-            f"{'s' if channel_count != 1 else ''} you're watching have uploaded "
-            "since the last check."
+            f"All quiet today — none of the {' and '.join(parts)} you're watching "
+            "have posted since the last check."
         )
     else:
-        line = "You're not watching any channels yet — nothing to check."
+        line = "You're not watching any channels or X accounts yet — nothing to check."
     body = (
-        f"\U0001F4ED No new videos — {date_str}\n\n"
+        f"\U0001F4ED No new content — {date_str}\n\n"
         f"{line}\n\n"
         "I'll keep watching and send a full summary the moment something drops.\n"
     )
@@ -637,7 +953,7 @@ def send_no_new_videos_email(channel_count, dry=False):
 def process_new_video(channel_name, entry, dry=False):
     """Summarize + email a single video (a one-item dated digest)."""
     item = summarize_video(channel_name, entry)
-    send_digest_email([item], dry=dry)
+    send_digest_email([item], [], dry=dry)
     print(f"  wrote {item['pdf']} and emailed it")
 
 
@@ -671,6 +987,82 @@ def run_single_video(only, video_ref, dry=False):
     process_new_video(channel["name"], entry, dry=dry)
 
 
+def _thread_item(handle, conversation_id, group, tldr):
+    """Build one x_account_items[...]["threads"] entry: render the PDF and describe it."""
+    published_dt = None
+    try:
+        published_dt = datetime.datetime.fromisoformat(group[0]["created_at"].replace("Z", "+00:00"))
+    except (KeyError, ValueError):
+        pass
+    published_date = published_dt.strftime("%Y-%m-%d") if published_dt else "unknown"
+    pdf = write_tweet_pdf(handle, conversation_id, group, published_date, tldr)
+    title = f"Thread ({len(group)} posts)" if len(group) > 1 else expand_tweet_text(group[0])[:60]
+    url = f"https://x.com/{handle}/status/{group[0]['id']}"
+    return {"title": title, "url": url, "pdf": pdf}
+
+
+def process_x_account(user, since_id):
+    """Fetch, group, backfill, summarize, and render PDFs for one account's new posts
+    since `since_id`. `since_id=None` means first encounter: only the single newest
+    thread is processed (mirrors YouTube's back-catalog-skipping first-run rule) rather
+    than emailing the whole visible history. Returns (x_account_item or None if nothing
+    new, newest tweet id seen or None)."""
+    user_id, handle = user["user_id"], user["handle"]
+    tweets = filter_self_thread_tweets(fetch_x_user_tweets(user_id, since_id=since_id), user_id)
+    if not tweets:
+        return None, None
+    newest_id = str(max(int(t["id"]) for t in tweets))
+    groups = group_by_conversation(tweets)
+    if since_id is None:
+        newest_conv = max(groups, key=lambda cid: max(int(t["id"]) for t in groups[cid]))
+        groups = {newest_conv: groups[newest_conv]}
+        tweets = groups[newest_conv]
+    groups = complete_thread_groups(groups, user_id, handle)
+
+    tldr = summarize_x_posts(handle, [expand_tweet_text(t) for t in tweets])
+    threads = [_thread_item(handle, conversation_id, group, tldr) for conversation_id, group in groups.items()]
+    return {"handle": handle, "tldr": tldr, "threads": threads}, newest_id
+
+
+def process_new_x_thread(handle, conversation_id, tweets, dry=False):
+    """Summarize + email one specific X thread/post (a one-item dated digest)."""
+    tldr = summarize_x_posts(handle, [expand_tweet_text(t) for t in tweets])
+    account_item = {"handle": handle, "tldr": tldr, "threads": [_thread_item(handle, conversation_id, tweets, tldr)]}
+    send_digest_email([], [account_item], dry=dry)
+    print(f"  wrote {account_item['threads'][0]['pdf']} and emailed it")
+
+
+def extract_tweet_id(ref):
+    match = re.search(r"status/(\d+)", ref)
+    if match:
+        return match.group(1)
+    return ref if re.fullmatch(r"\d+", ref) else None
+
+
+def run_single_tweet(only, tweet_ref, dry=False):
+    """Summarize + email one specific tweet/thread from a watched X account's feed. A
+    one-off resend/backfill: does NOT touch x_last_seen."""
+    x_users = load_x_users()
+    matches = [u for u in x_users if u["user_id"] == only or u["handle"] == only]
+    if not matches:
+        print(f"--only {only!r} matched no watched X account — exiting.")
+        return
+    user = matches[0]
+    tweet_id = extract_tweet_id(tweet_ref)
+    if not tweet_id:
+        print(f"Could not parse a tweet id from {tweet_ref!r}")
+        return
+    tweets = filter_self_thread_tweets(fetch_x_user_tweets(user["user_id"]), user["user_id"])
+    entry = next((t for t in tweets if t["id"] == tweet_id), None)
+    if not entry:
+        print(f"Tweet {tweet_id} not found in @{user['handle']}'s current feed "
+              "(only recent tweets are listed).")
+        return
+    groups = complete_thread_groups(group_by_conversation(tweets), user["user_id"], user["handle"])
+    group = groups[entry["conversation_id"]]
+    process_new_x_thread(user["handle"], entry["conversation_id"], group, dry=dry)
+
+
 def run_digest(force=False, dry=False, only=None):
     now_pt = datetime.datetime.now(PACIFIC)
     today = now_pt.date().isoformat()
@@ -686,11 +1078,14 @@ def run_digest(force=False, dry=False, only=None):
             return
 
     channels = load_channels()
+    x_users = load_x_users()
     if only:
         channels = [c for c in channels if c["channel_id"] == only or c["name"] == only]
-        if not channels:
-            print(f"--only {only!r} matched no watched channel — exiting.")
+        x_users = [u for u in x_users if u["user_id"] == only or u["handle"] == only]
+        if not channels and not x_users:
+            print(f"--only {only!r} matched no watched channel or X account — exiting.")
             return
+
     last_seen = load_json(LAST_SEEN_FILE, {})
     items = []        # all new videos across channels, summarized
     advance = {}      # channel_id -> newest video id to mark seen (only fully summarized)
@@ -729,25 +1124,49 @@ def run_digest(force=False, dry=False, only=None):
                 break
         time.sleep(1)  # be gentle to YouTube from a single runner IP
 
-    # Did we actually assess the world? True if we read >=1 feed, or there's nothing to
-    # watch. False means every fetch failed (network/YouTube down) — don't claim "all
-    # quiet" and don't mark today done, so a later fire retries instead of skipping a day.
-    checked = feeds_read > 0 or not channels
+    x_last_seen = load_json(X_LAST_SEEN_FILE, {})
+    x_account_items = []   # one entry per account with new posts (see process_x_account)
+    x_advance = {}         # user_id -> newest tweet id to mark seen (only fully summarized)
+    x_read = 0             # accounts whose timeline we actually managed to read this run
 
-    if items:
-        send_digest_email(items, dry=dry)  # ONE email for the whole day's batch
-        print(f"sent {len(items)} video(s) in one digest email")
+    for user in x_users:
+        handle = user["handle"]
+        print(f"Checking @{handle} ({user['user_id']})")
+        try:
+            item, newest_id = process_x_account(user, x_last_seen.get(user["user_id"]))
+            x_read += 1
+            if item:
+                x_account_items.append(item)
+            if newest_id:
+                x_advance[user["user_id"]] = newest_id
+        except Exception as exc:  # noqa: BLE001
+            print(f"  failed on @{handle}: {exc} — will retry next run")
+        time.sleep(1)
+
+    # Did we actually assess the world? True per platform if we read >=1 feed/account, or
+    # there was nothing to watch on it. False means every fetch on that platform failed
+    # (network/API down) — don't claim "all quiet" and don't mark today done, so a later
+    # fire retries instead of skipping a day.
+    checked = (feeds_read > 0 or not channels) and (x_read > 0 or not x_users)
+
+    if items or x_account_items:
+        send_digest_email(items, x_account_items, dry=dry)  # ONE email for the whole day's batch
+        total = len(items) + sum(len(a["threads"]) for a in x_account_items)
+        print(f"sent {total} item(s) in one digest email")
     elif checked:
-        print("No new videos — sending the daily 'all quiet' note.")
-        send_no_new_videos_email(len(channels), dry=dry)
+        print("No new content — sending the daily 'all quiet' note.")
+        send_no_new_content_email(len(channels), len(x_users), dry=dry)
     else:
-        print(f"Could not read any of {len(channels)} feeds — not sending a note; "
+        print("Could not read all watched feeds/accounts — not sending a note; "
               "leaving today unmarked so the next fire retries.")
 
     if not dry and checked:
         for cid, vid in advance.items():
             last_seen[cid] = vid
         save_json(LAST_SEEN_FILE, last_seen)
+        for uid, tid in x_advance.items():
+            x_last_seen[uid] = tid
+        save_json(X_LAST_SEEN_FILE, x_last_seen)
         LAST_DIGEST_FILE.write_text(today + "\n")  # mark today done so later fires skip
         LAST_CHECKED_FILE.write_text(now_pt.isoformat() + "\n")
         prune_old_pdfs()  # keep the committed summaries/ folder bounded
@@ -757,6 +1176,7 @@ def run_digest(force=False, dry=False, only=None):
 # Command mode (Gmail inbox)
 # --------------------------------------------------------------------------- #
 YT_URL_RE = re.compile(r"https?://(?:www\.|m\.)?(?:youtube\.com|youtu\.be)/\S+", re.I)
+X_URL_RE = re.compile(r"https?://(?:www\.)?(?:x\.com|twitter\.com)/\S+", re.I)
 
 
 def normalize_subject(subject):
@@ -821,25 +1241,26 @@ def clear_pending():
     save_json(PENDING_FILE, {})
 
 
-def resolve_target(text, channels, pending):
-    """Map a user reply (a number or a channel name) to a channel_id."""
-    stripped = re.sub(r"\b(yt|delete|remove|stop)\b", " ", text, flags=re.I).strip()
+def resolve_target(text, items, pending, id_key="channel_id", name_key="name"):
+    """Map a user reply (a number or a name) to an item's id, generic over any
+    list of {id_key, name_key}-shaped records (YouTube channels or X users)."""
+    stripped = re.sub(r"\b(yt|x|delete|remove|stop)\b", " ", text, flags=re.I).strip()
     num = re.search(r"\b(\d{1,3})\b", stripped)
     if num:
         idx = num.group(1)
         if pending.get("action") == "delete" and idx in pending.get("map", {}):
             return pending["map"][idx]
         n = int(idx)
-        if 1 <= n <= len(channels):
-            return channels[n - 1]["channel_id"]
+        if 1 <= n <= len(items):
+            return items[n - 1][id_key]
     name = stripped.strip().strip('"').strip()
     if name:
-        for channel in channels:
-            if channel["name"].lower() == name.lower():
-                return channel["channel_id"]
-        for channel in channels:
-            if name.lower() in channel["name"].lower():
-                return channel["channel_id"]
+        for item in items:
+            if item[name_key].lower() == name.lower():
+                return item[id_key]
+        for item in items:
+            if name.lower() in item[name_key].lower():
+                return item[id_key]
     return None
 
 
@@ -877,72 +1298,147 @@ def cmd_add(url, channels, dry=False):
     )
 
 
-def cmd_list(channels):
-    if not channels:
-        return "You're not watching any channels yet. Email a YouTube link with subject 'yt add ...' to start."
-    lines = [f"You're watching {len(channels)} channels:"]
-    lines += [f"{i}. {c['name']}" for i, c in enumerate(channels, 1)]
-    lines.append('\nReply "yt delete <number or name>" to remove one.')
+def cmd_x_add(handle_or_url, x_users, dry=False):
+    user_id, handle = resolve_x_handle(handle_or_url)
+    if not user_id:
+        return (f"Couldn't find an X account from that link/handle:\n{handle_or_url}\n"
+                "Try the profile URL (https://x.com/handle) or just @handle.")
+    existing = next((u for u in x_users if u["user_id"] == user_id), None)
+    if existing:
+        return f"Already watching @{existing['handle']}."
+
+    latest = filter_self_thread_tweets(fetch_x_user_tweets(user_id, max_results=5), user_id)
+    latest_id = str(max(int(t["id"]) for t in latest)) if latest else None
+    latest_text = expand_tweet_text(latest[-1])[:80] if latest else "(none)"
+
+    x_users.append(
+        {"user_id": user_id, "handle": handle, "added_at": datetime.date.today().isoformat()}
+    )
+    if not dry:
+        save_x_users(x_users)
+
+    x_last_seen = load_json(X_LAST_SEEN_FILE, {})
+    if latest_id:
+        x_last_seen[user_id] = latest_id  # seed: only future posts get summarized
+        if not dry:
+            save_json(X_LAST_SEEN_FILE, x_last_seen)
+
+    return (
+        f"Added @{handle}. You'll get a summary for every new post from now on.\n"
+        f"Profile: https://x.com/{handle}\n"
+        f'Latest existing post (not summarized): "{latest_text}"\n'
+        f'Now watching {len(x_users)} X account{"s" if len(x_users) != 1 else ""}. Reply "x list" to see them.'
+    )
+
+
+def cmd_list(items, id_key="channel_id", name_key="name", noun="channel", cmd_prefix="yt"):
+    if not items:
+        return f"You're not watching any {noun}s yet."
+    lines = [f"You're watching {len(items)} {noun}{'s' if len(items) != 1 else ''}:"]
+    lines += [f"{i}. {it[name_key]}" for i, it in enumerate(items, 1)]
+    lines.append(f'\nReply "{cmd_prefix} delete <number or name>" to remove one.')
     return "\n".join(lines)
 
 
-def cmd_delete_prompt(channels, dry=False):
-    if not channels:
-        return "You're not watching any channels."
-    mapping = {str(i): c["channel_id"] for i, c in enumerate(channels, 1)}
+def cmd_delete_prompt(items, id_key="channel_id", name_key="name", noun="channel",
+                       platform="yt", dry=False):
+    if not items:
+        return f"You're not watching any {noun}s."
+    mapping = {str(i): it[id_key] for i, it in enumerate(items, 1)}
     if not dry:
         save_json(
             PENDING_FILE,
-            {"action": "delete", "map": mapping, "created": datetime.datetime.now(PACIFIC).isoformat()},
+            {"action": "delete", "platform": platform, "map": mapping,
+             "created": datetime.datetime.now(PACIFIC).isoformat()},
         )
-    lines = ["Which channel should I delete? Reply with the number or the name:"]
-    lines += [f"{i}. {c['name']}" for i, c in enumerate(channels, 1)]
+    lines = ["Which one should I delete? Reply with the number or the name:"]
+    lines += [f"{i}. {it[name_key]}" for i, it in enumerate(items, 1)]
     return "\n".join(lines)
 
 
-def do_delete(cid, channels, dry=False):
-    name = next((c["name"] for c in channels if c["channel_id"] == cid), cid)
-    remaining = [c for c in channels if c["channel_id"] != cid]
+def do_delete(item_id, items, id_key, name_key, noun, save_fn, state_file, dry=False):
+    name = next((it[name_key] for it in items if it[id_key] == item_id), item_id)
+    remaining = [it for it in items if it[id_key] != item_id]
     if not dry:
-        save_channels(remaining)
-        last_seen = load_json(LAST_SEEN_FILE, {})
-        last_seen.pop(cid, None)
-        save_json(LAST_SEEN_FILE, last_seen)
+        save_fn(remaining)
+        last_seen = load_json(state_file, {})
+        last_seen.pop(item_id, None)
+        save_json(state_file, last_seen)
         clear_pending()
-    return f"\U0001F5D1 Removed {name} — now watching {len(remaining)} channels."
+    return f"\U0001F5D1 Removed {name} — now watching {len(remaining)} {noun}{'s' if len(remaining) != 1 else ''}."
 
 
 def handle_command(command_text, dry=False):
     text = command_text.strip()
     low = text.lower()
     channels = load_channels()
+    x_users = load_x_users()
     pending = load_pending()
+    pending_delete = pending.get("action") == "delete"
+    pending_platform = pending.get("platform", "yt")
+
+    # X-specific detection must run BEFORE the generic (YouTube) keyword checks below,
+    # since "delete"/"list" also appear inside "x delete"/"x list" text — an explicit
+    # "x ..." prefix always means X; a bare "list"/"delete" keeps meaning YouTube.
+    wants_add_x = X_URL_RE.search(text)
+    x_add_arg = wants_add_x.group(0).strip() if wants_add_x else None
+    if not x_add_arg:
+        bare_handle = re.search(r"\bx\s+add\s+(@?[A-Za-z0-9_]{1,15})\b", text, re.I)
+        if bare_handle:
+            x_add_arg = bare_handle.group(1)
+    wants_delete_x = re.search(r"\bx\s+(delete|remove|stop)\b", low)
+    wants_list_x = re.search(r"\bx\s+(list|accounts?)\b", low)
 
     wants_add = YT_URL_RE.search(text)
     wants_delete = re.search(r"\b(delete|remove|stop)\b", low)
     # 'show' is intentionally NOT a list synonym: it collides with channel names
     # (e.g. "The Saamir Show"), which would misroute a delete-by-name to `list`.
     wants_list = re.search(r"\b(list|channels)\b", low)
-    pending_delete = pending.get("action") == "delete"
 
-    if wants_add:
+    if x_add_arg:
+        reply = cmd_x_add(x_add_arg, x_users, dry=dry)
+    elif wants_add:
         reply = cmd_add(wants_add.group(0).strip(), channels, dry=dry)
-    elif pending_delete and not wants_list:
-        # We previously asked which channel to delete; this reply is the target
+    elif pending_delete and not (wants_list or wants_list_x):
+        # We previously asked which channel/account to delete; this reply is the target
         # (a number or a name). Resolve it BEFORE the generic `list` fallback so a
-        # channel name isn't mistaken for a command. (`list` still lets you peek.)
-        cid = resolve_target(text, channels, pending)
-        if cid:
-            reply = do_delete(cid, channels, dry=dry)
+        # name isn't mistaken for a command. (`list`/`x list` still let you peek.)
+        # pending.platform (set when the prompt was issued) picks which list applies.
+        if pending_platform == "x":
+            items, id_key, name_key, noun = x_users, "user_id", "handle", "X account"
+            save_fn, state_file, list_cmd = save_x_users, X_LAST_SEEN_FILE, "x list"
         else:
-            reply = "Reply with the number or name to delete (or 'list' to see them)."
+            items, id_key, name_key, noun = channels, "channel_id", "name", "channel"
+            save_fn, state_file, list_cmd = save_channels, LAST_SEEN_FILE, "list"
+        target_id = resolve_target(text, items, pending, id_key=id_key, name_key=name_key)
+        if target_id:
+            reply = do_delete(target_id, items, id_key, name_key, noun, save_fn, state_file, dry=dry)
+        else:
+            reply = f"Reply with the number or name to delete (or '{list_cmd}' to see them)."
+    elif wants_delete_x:
+        uid = resolve_target(text, x_users, pending, id_key="user_id", name_key="handle")
+        reply = (
+            do_delete(uid, x_users, "user_id", "handle", "X account", save_x_users, X_LAST_SEEN_FILE, dry=dry)
+            if uid else
+            cmd_delete_prompt(x_users, "user_id", "handle", "X account", platform="x", dry=dry)
+        )
+    elif wants_list_x:
+        reply = cmd_list(x_users, "user_id", "handle", "X account", cmd_prefix="x")
     elif wants_delete:
         cid = resolve_target(text, channels, pending)
-        reply = do_delete(cid, channels, dry=dry) if cid else cmd_delete_prompt(channels, dry=dry)
+        reply = (
+            do_delete(cid, channels, "channel_id", "name", "channel", save_channels, LAST_SEEN_FILE, dry=dry)
+            if cid else
+            cmd_delete_prompt(channels, "channel_id", "name", "channel", platform="yt", dry=dry)
+        )
     elif wants_list:
-        reply = cmd_list(channels)
+        reply = cmd_list(channels, "channel_id", "name", "channel", cmd_prefix="yt")
     else:
-        reply = "I didn't catch that. Reply with:\n  add <link>   |   list   |   delete"
+        reply = (
+            "I didn't catch that. Reply with:\n"
+            "  add <link>   |   list   |   delete\n"
+            "  x add <link or @handle>   |   x list   |   x delete"
+        )
 
     send_threaded(reply, dry=dry)
 
@@ -991,7 +1487,7 @@ def run_commands(dry=False):
 
         nsubj = normalize_subject(message.get("Subject", ""))
         body = get_text_body(message)
-        if nsubj.lower().startswith("yt"):                   # a fresh "yt ..." email
+        if re.match(r"^(yt|x)\b", nsubj, re.I):               # a fresh "yt ..."/"x ..." email
             command_text = f"{nsubj}\n{body}"
         elif nsubj.strip().lower().startswith(base_subject) or (thread_ids & header_refs(message)):
             command_text = extract_reply_text(body)          # a reply inside our thread
@@ -1025,12 +1521,14 @@ def run_commands(dry=False):
 # --------------------------------------------------------------------------- #
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=["digest", "commands", "feed"], required=True)
+    parser.add_argument("--mode", choices=["digest", "commands", "feed", "x-feed"], required=True)
     parser.add_argument("--force", action="store_true", help="ignore the 8am Pacific guard (digest)")
     parser.add_argument("--no-email", action="store_true", help="print emails instead of sending")
-    parser.add_argument("--only", help="digest: limit the run to one watched channel (id or name)")
+    parser.add_argument("--only", help="digest/feed/x-feed: limit to one watched channel or X account (id/handle/name)")
     parser.add_argument("--video", help="digest: summarize + email one specific video (id or URL) "
                                          "from the --only channel; does not advance last_seen")
+    parser.add_argument("--post", help="digest: summarize + email one specific tweet/thread (id or URL) "
+                                        "from the --only X account; does not advance x_last_seen")
     args = parser.parse_args()
 
     if args.mode == "digest":
@@ -1038,12 +1536,20 @@ def main():
             if not args.only:
                 parser.error("--video requires --only <channel id or name>")
             run_single_video(args.only, args.video, dry=args.no_email)
+        elif args.post:
+            if not args.only:
+                parser.error("--post requires --only <X account id or handle>")
+            run_single_tweet(args.only, args.post, dry=args.no_email)
         else:
             run_digest(force=args.force, dry=args.no_email, only=args.only)
     elif args.mode == "feed":
         if not args.only:
             parser.error("--mode feed requires --only <channel id or name>")
         debug_feed(args.only)
+    elif args.mode == "x-feed":
+        if not args.only:
+            parser.error("--mode x-feed requires --only <X account id or handle>")
+        debug_x_feed(args.only)
     else:
         run_commands(dry=args.no_email)
 

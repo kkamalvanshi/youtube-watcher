@@ -14,20 +14,24 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "digest: normal run. feed: print one channel's raw RSS feed (diagnostic, no email/state changes)"
+        description: "digest: normal run. feed/x-feed: print one channel's raw RSS feed or one X account's raw tweets (diagnostic, no email/state changes)"
         type: choice
-        options: ["digest", "feed"]
+        options: ["digest", "feed", "x-feed"]
         default: "digest"
       force:
         description: "Force send now, bypassing the 8am / once-per-day guard (manual testing)"
         type: boolean
         default: false
       only:
-        description: "Limit this run to one watched channel (id or name); required for mode=feed"
+        description: "Limit this run to one watched channel or X account (id/handle/name); required for mode=feed/x-feed"
         type: string
         default: ""
       video:
         description: "mode=digest only: summarize + email this one video (id or URL) from --only; skips last_seen tracking"
+        type: string
+        default: ""
+      post:
+        description: "mode=digest only: summarize + email this one tweet/thread (id or URL) from --only; skips x_last_seen tracking"
         type: string
         default: ""
 
@@ -49,7 +53,7 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements.txt
       - name: Install Chromium for PDF rendering
-        if: github.event.inputs.mode != 'feed'
+        if: github.event.inputs.mode != 'feed' && github.event.inputs.mode != 'x-feed'
         run: |
           python -m playwright install --with-deps chromium
           sudo apt-get install -y fonts-noto-color-emoji
@@ -58,8 +62,14 @@ jobs:
         env:
           ONLY_INPUT: ${{ github.event.inputs.only }}
         run: python watcher.py --mode feed --only "$ONLY_INPUT"
+      - name: Print raw X feed (diagnostic)
+        if: github.event.inputs.mode == 'x-feed'
+        env:
+          X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
+          ONLY_INPUT: ${{ github.event.inputs.only }}
+        run: python watcher.py --mode x-feed --only "$ONLY_INPUT"
       - name: Run digest
-        if: github.event.inputs.mode != 'feed'
+        if: github.event.inputs.mode != 'feed' && github.event.inputs.mode != 'x-feed'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
@@ -71,9 +81,11 @@ jobs:
           SUPADATA_API_KEY: ${{ secrets.SUPADATA_API_KEY }}
           WEBSHARE_PROXY_USERNAME: ${{ secrets.WEBSHARE_PROXY_USERNAME }}
           WEBSHARE_PROXY_PASSWORD: ${{ secrets.WEBSHARE_PROXY_PASSWORD }}
+          X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
           FORCE_INPUT: ${{ github.event.inputs.force }}
           ONLY_INPUT: ${{ github.event.inputs.only }}
           VIDEO_INPUT: ${{ github.event.inputs.video }}
+          POST_INPUT: ${{ github.event.inputs.post }}
         run: |
           # Only an explicit manual force bypasses the guard. The external
           # cron-job.org trigger and the GitHub schedule fallback both run the
@@ -90,9 +102,12 @@ jobs:
           if [ -n "$VIDEO_INPUT" ]; then
             args+=(--video "$VIDEO_INPUT")
           fi
+          if [ -n "$POST_INPUT" ]; then
+            args+=(--post "$POST_INPUT")
+          fi
           python watcher.py "${args[@]}"
       - name: Commit summaries & state
-        if: github.event.inputs.mode != 'feed'
+        if: github.event.inputs.mode != 'feed' && github.event.inputs.mode != 'x-feed'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
