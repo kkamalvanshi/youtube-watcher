@@ -645,6 +645,13 @@ def send_threaded(body, attachments=None, subject=None, dry=False):
     refs = thread.get("references", [])
     new_id = make_msgid()
 
+    # Command replies pass no subject override; without one, always send under TODAY's
+    # dated subject (matching the digest's own "{base} — {date}" format) rather than the
+    # bare undated base_subject, so Gmail files the reply into today's conversation
+    # instead of whichever day's thread happened to exist when base_subject was first set.
+    date_str = datetime.datetime.now(PACIFIC).strftime("%B %-d, %Y")
+    outgoing_subject = subject or f"{base_subject} — {date_str}"
+
     headers = {"X-YT-Watcher": "bot", "Message-ID": new_id}
     if last_id:
         headers["In-Reply-To"] = last_id
@@ -652,11 +659,11 @@ def send_threaded(body, attachments=None, subject=None, dry=False):
 
     if dry:
         print("---- DRY-RUN EMAIL (Resend) ----")
-        print("Subject:", subject or base_subject)
+        print("Subject:", outgoing_subject)
         print(body)
         return
 
-    resend_send(subject or base_subject, body + footer(), headers,
+    resend_send(outgoing_subject, body + footer(), headers,
                 reply_to=recipient, attachments=attachments)
     thread.setdefault("base_subject", base_subject)
     thread.setdefault("root_message_id", new_id)
