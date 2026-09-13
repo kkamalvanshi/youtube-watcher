@@ -503,15 +503,21 @@ def expand_tweet_text(tweet):
 
 
 def debug_x_feed(only):
-    """Print one watched X account's raw fetched tweets (diagnostic, no state changes)."""
+    """Print one X account's raw fetched tweets (diagnostic, no state changes). Looks up
+    `only` in x_users.json first; if it isn't watched yet, resolves it live via the X API
+    so this works standalone (e.g. to sanity-check a handle/token before ever adding it)."""
     x_users = load_x_users()
     matches = [u for u in x_users if u["user_id"] == only or u["handle"] == only]
-    if not matches:
-        print(f"{only!r} matched no watched X account.")
-        return
-    user = matches[0]
-    tweets = fetch_x_user_tweets(user["user_id"])
-    print(f"@{user['handle']}: {len(tweets)} tweets fetched (no since_id — full recent window):")
+    if matches:
+        user_id, handle = matches[0]["user_id"], matches[0]["handle"]
+    else:
+        print(f"{only!r} isn't watched yet — resolving it live via the X API...")
+        user_id, handle = resolve_x_handle(only)
+        if not user_id:
+            print(f"Could not resolve {only!r} to an X account.")
+            return
+    tweets = fetch_x_user_tweets(user_id)
+    print(f"@{handle}: {len(tweets)} tweets fetched (no since_id — full recent window):")
     for tweet in tweets:
         print(f"  {tweet['id']}  {tweet.get('created_at', '?')}  "
               f"in_reply_to={tweet.get('in_reply_to_user_id')}  "
