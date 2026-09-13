@@ -22,7 +22,7 @@ Runs free on **GitHub Actions** (public repo). Starting channel: **Brandon Carte
 - **`commands.yml`** — every ~15 min. Reads your `yt`/`x` command emails over
   IMAP and replies.
 
-## Commands (email `kkamalvanshi@gmail.com`, subject starting `yt` or `x`)
+## Commands (email `your-gmail@example.com`, subject starting `yt` or `x`)
 
 | Send | Action |
 |---|---|
@@ -40,7 +40,7 @@ Only emails from `ALLOWLIST_SENDERS` are acted on.
 ## One-time setup
 
 1. Create a personal **Anthropic API key** at https://console.anthropic.com .
-2. On `kkamalvanshi@gmail.com`: enable **2-Step Verification**, generate a 16-char
+2. On `your-gmail@example.com`: enable **2-Step Verification**, generate a 16-char
    **App Password** (Google → Security → App passwords), and **enable IMAP**
    (Gmail → Settings → Forwarding and POP/IMAP → Enable IMAP).
 3. Create a **public** GitHub repo and push this project.
@@ -48,10 +48,10 @@ Only emails from `ALLOWLIST_SENDERS` are acted on.
    - `ANTHROPIC_API_KEY`
    - `RESEND_API_KEY` = your Resend API key (sending, so mail arrives from a distinct sender)
    - `RESEND_FROM` = `YouTube Watcher <onboarding@resend.dev>`
-   - `RECIPIENT` = `kkamalvanshi@gmail.com` (where summaries are sent)
-   - `GMAIL_ADDRESS` = `kkamalvanshi@gmail.com` (inbox the command listener reads via IMAP)
+   - `RECIPIENT` = `your-gmail@example.com` (where summaries are sent)
+   - `GMAIL_ADDRESS` = `your-gmail@example.com` (inbox the command listener reads via IMAP)
    - `GMAIL_APP_PASSWORD` = the 16-char app password
-   - `ALLOWLIST_SENDERS` = `kkamalvanshi@gmail.com`
+   - `ALLOWLIST_SENDERS` = `your-gmail@example.com`
    - `SUPADATA_API_KEY` = Supadata API key — primary transcript source (reliable, no proxy)
    - `WEBSHARE_PROXY_USERNAME` = Webshare residential proxy username (optional transcript fallback)
    - `WEBSHARE_PROXY_PASSWORD` = Webshare residential proxy password (optional transcript fallback)
